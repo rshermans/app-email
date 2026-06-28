@@ -1,0 +1,15 @@
+services:
+  smart-outreach-mailer:
+    build: .
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: 4000
+      DATA_DIR: /app/data
+      APP_SECRET: ${APP_SECRET:-change-this-long-random-secret-before-production}
+      GLOBAL_MAX_EMAILS_PER_MINUTE: 60
+    volumes:
+      - smart_outreach_data:/app/data
+
+volumes:
+  smart_outreach_data:

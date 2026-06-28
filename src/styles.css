@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #172126;
+  background: #f4f7f6;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.focus-ring {
+  @apply focus:outline-none focus:ring-2 focus:ring-pine/30 focus:ring-offset-1;
+}
+
+.field {
+  @apply w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-ink shadow-sm focus-ring;
+}
+
+.label {
+  @apply text-xs font-semibold uppercase tracking-wide text-slate-500;
+}
+
+.primary-button {
+  @apply inline-flex items-center justify-center gap-2 rounded-md bg-pine px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:bg-slate-300;
+}
+
+.secondary-button {
+  @apply inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-pine hover:text-pine disabled:cursor-not-allowed disabled:text-slate-300;
+}
+
+.danger-button {
+  @apply inline-flex items-center justify-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-sm font-semibold text-red-700 shadow-sm transition hover:bg-red-50 disabled:cursor-not-allowed disabled:text-slate-300;
+}
+
+.panel {
+  @apply rounded-lg border border-slate-200 bg-white shadow-soft;
+}
+
+.table-heading {
+  @apply bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500;
+}
+
+.metric {
+  @apply rounded-md border border-slate-200 bg-white px-3 py-2;
+}
