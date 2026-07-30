@@ -91,7 +91,68 @@ db.exec(`
     FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
     FOREIGN KEY (job_id) REFERENCES email_jobs(id) ON DELETE SET NULL
   );
+
+  CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    event_date TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    default_variables_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS event_contacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    contact_id INTEGER NOT NULL,
+    group_name TEXT,
+    template_key TEXT,
+    template_id INTEGER,
+    selected_for_email INTEGER NOT NULL DEFAULT 1,
+    fields_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE,
+    FOREIGN KEY (template_id) REFERENCES templates(id) ON DELETE SET NULL,
+    UNIQUE (event_id, contact_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS event_contacts_event_idx
+    ON event_contacts (event_id, group_name);
+  CREATE INDEX IF NOT EXISTS event_contacts_template_idx
+    ON event_contacts (event_id, template_id);
 `);
+
+function columnExists(table, column) {
+  return db
+    .prepare(`PRAGMA table_info(${table})`)
+    .all()
+    .some((row) => row.name === column);
+}
+
+function addColumn(table, definition) {
+  const [column] = definition.trim().split(/\s+/, 1);
+  if (!columnExists(table, column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+  }
+}
+
+addColumn("templates", "event_id INTEGER");
+addColumn("templates", "source_filename TEXT");
+addColumn("campaigns", "event_id INTEGER");
+addColumn("campaigns", "template_mode TEXT NOT NULL DEFAULT 'single'");
+addColumn("campaigns", "global_variables_json TEXT NOT NULL DEFAULT '{}'");
+addColumn("email_jobs", "template_id INTEGER");
+addColumn("email_jobs", "template_name TEXT");
+addColumn("email_jobs", "template_subject TEXT");
+addColumn("email_jobs", "template_body_text TEXT");
+addColumn("email_jobs", "template_body_html TEXT");
+addColumn("email_jobs", "merge_data_json TEXT NOT NULL DEFAULT '{}'");
+addColumn("email_jobs", "group_name TEXT");
+addColumn("event_contacts", "selected_for_email INTEGER NOT NULL DEFAULT 1");
 
 const templateCount = db.prepare("SELECT COUNT(*) AS count FROM templates").get().count;
 
@@ -100,25 +161,143 @@ if (templateCount === 0) {
     INSERT INTO templates (name, subject, body_text, body_html)
     VALUES (?, ?, ?, ?)
   `).run(
-    "Primeiro contacto",
-    "Olá {{name}}, podemos falar?",
-    "Olá {{name}},\n\nVi que está associado a {{company}} e gostava de lhe apresentar uma proposta breve.\n\nCumprimentos,",
-    "<p>Olá <strong>{{name}}</strong>,</p><p>Vi que está associado a {{company}} e gostava de lhe apresentar uma proposta breve.</p><p>Cumprimentos,</p>"
+    "Inquérito final – Escrita Académica com IA",
+    "Lembrete: submissão do inquérito final do curso de Escrita Académica com IA",
+    "Caro(a) {{name}},\n\nEscrevo-lhe individualmente porque o seu caso merece uma nota, e não um lembrete automático.\n\nA classificação do curso depende da submissão do inquérito final. O inquérito documenta o percurso; não o julga pela sua completude.\n\nCom estima,\n{{ASSINATURA}} — Equipa de formação, PhD4Moz",
+    "<p>Caro(a) <strong>{{name}}</strong>,</p><p>Escrevo-lhe individualmente porque o seu caso merece uma nota, e não um lembrete automático.</p><p>A classificação do curso depende da submissão do inquérito final. O inquérito documenta o percurso; não o julga pela sua completude.</p><p>Com estima,<br><strong>{{ASSINATURA}}</strong> — Equipa de formação, PhD4Moz</p>"
   );
 }
 
-export function asBoolean(value) {
-  return value ? 1 : 0;
+let legacyEvent = db
+  .prepare("SELECT * FROM events ORDER BY id ASC LIMIT 1")
+  .get();
+
+if (!legacyEvent) {
+  const result = db.prepare(`
+    INSERT INTO events (name, description, status, default_variables_json)
+    VALUES (?, ?, 'active', '{}')
+  `).run(
+    "Dados anteriores",
+    "Contactos, modelos e campanhas existentes antes da organização por eventos."
+  );
+  legacyEvent = db.prepare("SELECT * FROM events WHERE id = ?").get(result.lastInsertRowid);
+}
+
+db.prepare("UPDATE templates SET event_id = ? WHERE event_id IS NULL").run(legacyEvent.id);
+db.prepare("UPDATE campaigns SET event_id = ? WHERE event_id IS NULL").run(legacyEvent.id);
+db.prepare(`
+  INSERT OR IGNORE INTO event_contacts (event_id, contact_id, fields_json)
+  SELECT ?, id, '{}' FROM contacts
+`).run(legacyEvent.id);
+
+db.prepare(`
+  UPDATE email_jobs
+  SET
+    template_id = COALESCE(template_id, (
+      SELECT c.template_id FROM campaigns c WHERE c.id = email_jobs.campaign_id
+    )),
+    template_name = COALESCE(template_name, (
+      SELECT c.template_name FROM campaigns c WHERE c.id = email_jobs.campaign_id
+    )),
+    template_subject = COALESCE(template_subject, (
+      SELECT c.template_subject FROM campaigns c WHERE c.id = email_jobs.campaign_id
+    )),
+    template_body_text = COALESCE(template_body_text, (
+      SELECT c.template_body_text FROM campaigns c WHERE c.id = email_jobs.campaign_id
+    )),
+    template_body_html = COALESCE(template_body_html, (
+      SELECT c.template_body_html FROM campaigns c WHERE c.id = email_jobs.campaign_id
+    ))
+  WHERE template_subject IS NULL
+`).run();
+
+function parseJson(value, fallback = {}) {
+  try {
+    return value ? JSON.parse(value) : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export function nowIso() {
   return new Date().toISOString();
 }
 
-export function listCampaigns() {
+export function listEvents() {
   return db.prepare(`
-    SELECT *
-    FROM campaigns
+    SELECT
+      e.*,
+      (SELECT COUNT(*) FROM event_contacts ec WHERE ec.event_id = e.id) AS contact_count,
+      (SELECT COUNT(*) FROM templates t WHERE t.event_id = e.id) AS template_count,
+      (SELECT COUNT(*) FROM campaigns c WHERE c.event_id = e.id) AS campaign_count,
+      (SELECT COUNT(DISTINCT COALESCE(ec.group_name, ''))
+        FROM event_contacts ec WHERE ec.event_id = e.id) AS group_count
+    FROM events e
+    ORDER BY CASE e.status WHEN 'active' THEN 0 ELSE 1 END,
+      datetime(e.updated_at) DESC, e.id DESC
+  `).all().map((event) => ({
+    ...event,
+    default_variables: parseJson(event.default_variables_json)
+  }));
+}
+
+export function getEvent(id) {
+  const event = db.prepare("SELECT * FROM events WHERE id = ?").get(id);
+  if (!event) return null;
+  const contacts = listEventContacts(id);
+  const groups = db.prepare(`
+    SELECT COALESCE(group_name, 'Sem grupo') AS name, COUNT(*) AS count
+    FROM event_contacts
+    WHERE event_id = ?
+    GROUP BY COALESCE(group_name, 'Sem grupo')
+    ORDER BY count DESC, name ASC
+  `).all(id);
+  return {
+    ...event,
+    default_variables: parseJson(event.default_variables_json),
+    contacts,
+    groups
+  };
+}
+
+export function listEventContacts(eventId) {
+  return db.prepare(`
+    SELECT
+      ec.id AS event_contact_id,
+      ec.event_id,
+      ec.group_name,
+      ec.template_key,
+      ec.template_id,
+      ec.selected_for_email,
+      ec.fields_json,
+      ec.updated_at,
+      c.id,
+      c.name,
+      c.email,
+      c.company,
+      t.name AS assigned_template_name
+    FROM event_contacts ec
+    JOIN contacts c ON c.id = ec.contact_id
+    LEFT JOIN templates t ON t.id = ec.template_id
+    WHERE ec.event_id = ?
+    ORDER BY lower(c.name), c.id
+  `).all(eventId).map((contact) => ({
+    ...contact,
+    selected_for_email: Boolean(contact.selected_for_email),
+    fields: parseJson(contact.fields_json)
+  }));
+}
+
+export function listCampaigns(eventId = null) {
+  if (eventId) {
+    return db.prepare(`
+      SELECT * FROM campaigns
+      WHERE event_id = ?
+      ORDER BY datetime(created_at) DESC, id DESC
+    `).all(eventId);
+  }
+  return db.prepare(`
+    SELECT * FROM campaigns
     ORDER BY datetime(created_at) DESC, id DESC
   `).all();
 }
@@ -132,7 +311,10 @@ export function getCampaignWithDetails(id) {
     FROM email_jobs
     WHERE campaign_id = ?
     ORDER BY id ASC
-  `).all(id);
+  `).all(id).map((job) => ({
+    ...job,
+    merge_data: parseJson(job.merge_data_json)
+  }));
 
   const logs = db.prepare(`
     SELECT *
@@ -142,5 +324,10 @@ export function getCampaignWithDetails(id) {
     LIMIT 100
   `).all(id);
 
-  return { ...campaign, jobs, logs };
+  return {
+    ...campaign,
+    global_variables: parseJson(campaign.global_variables_json),
+    jobs,
+    logs
+  };
 }

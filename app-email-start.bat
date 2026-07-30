@@ -1,9 +1,9 @@
 @echo off
-title Smart Outreach Mailer - Local Server
+title LifeInternet Mail Studio - Local Server
 cd /d "%~dp0"
 
 echo ==========================================
-echo Starting Smart Outreach Mailer...
+echo Starting LifeInternet Mail Studio...
 echo ==========================================
 
 :: Check if .env exists, if not copy from example

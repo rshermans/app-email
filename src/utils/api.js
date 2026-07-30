@@ -11,7 +11,9 @@ export async function api(path, options = {}) {
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(payload.error || "Pedido falhou");
+    const error = new Error(payload.error || "Pedido falhou");
+    error.details = payload.details;
+    throw error;
   }
 
   return payload;

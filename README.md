@@ -1,15 +1,20 @@
-# APP-EMAIL (Smart Outreach Mailer)
+# LifeInternet Mail Studio
 
 **Criado por:** Rômulo Shermans (2026)
 
-O **APP-EMAIL** (Smart Outreach Mailer) é uma mini plataforma desenvolvida para gerir o envio de campanhas de e-mails personalizados através de um servidor SMTP próprio. A aplicação permite a importação de listas de contactos, a criação de templates dinâmicos (com variáveis) e o agendamento e envio massivo de e-mails, garantindo respeito pelos limites de envio do servidor (rate-limiting).
+O **LifeInternet Mail Studio** é um produto da LifeInternet Startup para organizar eventos, públicos, templates e campanhas de email personalizadas através de um servidor SMTP próprio. A aplicação preserva campos dinâmicos de cada evento, associa diferentes modelos aos respetivos segmentos e valida todos os destinatários antes do envio.
+
+A identidade visual combina lettering metálico verde–laranja com um globo formado por pontos, órbitas e fluxos de dados. O ativo principal está em `public/lifeinternet-brand.png`.
 
 ---
 
 ## 🌟 Principais Funcionalidades
 
-- **Gestão de Contactos via CSV**: Upload de ficheiros CSV com pré-visualização, validação de endereços de e-mail e bloqueio automático de duplicados.
-- **Templates Dinâmicos**: Criação e edição de templates de e-mail em formato HTML e Texto Simples. Suporta as variáveis: `{{name}}`, `{{email}}`, e `{{company}}`.
+- **Espaços por Evento**: Cada evento reúne público, segmentos, templates, campanhas e histórico.
+- **Importação Visual**: Upload combinado de CSV e vários HTMLs, com pré-visualização, validação, associação por `MODELO_EMAIL` e preservação de todas as colunas.
+- **Estúdio de Templates**: Edição HTML e texto com preview isolado em desktop/mobile, seleção do destinatário e campos dinâmicos arbitrários.
+- **Contactos Reutilizáveis**: Uma pessoa pode participar em vários eventos sem duplicação global do email.
+- **Acessibilidade**: Navegação por teclado, foco visível, estrutura semântica, reflow, redução de movimento e comunicação de estado para leitores de ecrã.
 - **Configuração SMTP Segura**: Introduza as credenciais do seu servidor SMTP. As palavras-passe são guardadas de forma cifrada (AES) na base de dados SQLite. Funcionalidade de teste de ligação incluída.
 - **Campanhas e Agendamento**: Lance campanhas imediatas ou agende para envio no futuro.
 - **Controlo de Fluxo (Rate Limiting)**: Defina o limite máximo de e-mails por minuto e o intervalo de pausa entre cada envio para evitar que o seu e-mail seja classificado como spam.
@@ -20,15 +25,15 @@ O **APP-EMAIL** (Smart Outreach Mailer) é uma mini plataforma desenvolvida para
 ## 🚀 Como Utilizar
 
 ### 1. Importar Contactos
-Na secção "Contactos", faça o upload de um ficheiro CSV. O sistema procura pelas colunas:
+Na secção "Público", escolha “Importar público”. O sistema reconhece automaticamente:
 - `Nome` ou `Name`
 - `Email`, `E-mail` ou `Mail`
 - `Company`, `Empresa` ou `Companhia`
 
-*Existe um ficheiro de exemplo em `samples/contacts.csv`.*
+Todas as colunas adicionais ficam disponíveis como variáveis, por exemplo `{{TOTAL}}`, `{{MENCAO}}` ou `{{FEEDBACK}}`.
 
 ### 2. Criar Templates
-Na secção "Templates", crie as suas mensagens. Pode redigir o corpo em HTML (recomendado para e-mails profissionais e com design) ou apenas em texto simples. Não se esqueça de usar as variáveis dinâmicas (ex: `Olá {{name}}`).
+Na secção "Templates", crie ou importe os seus modelos HTML. O preview é atualizado automaticamente e pode ser testado com qualquer participante do evento.
 
 ### 3. Configurar Servidor (SMTP)
 Na secção "Definições SMTP", insira os dados do seu fornecedor de e-mail (Host, Porta, E-mail, Password). Faça o **Teste de Ligação** para garantir que as credenciais estão corretas.

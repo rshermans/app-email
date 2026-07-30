@@ -7,22 +7,36 @@ import nodemailer from "nodemailer";
 import fs from "node:fs";
 import path from "node:path";
 import { parse } from "csv-parse/sync";
-import { db, getCampaignWithDetails, listCampaigns, nowIso } from "./db/database.js";
+import {
+  db,
+  getCampaignWithDetails,
+  getEvent,
+  listCampaigns,
+  listEventContacts,
+  listEvents,
+  nowIso
+} from "./db/database.js";
 import { decryptSecret, encryptSecret } from "./crypto.js";
-import { renderTemplate } from "./render.js";
+import {
+  availableVariables,
+  extractVariables,
+  normalizeVariableKey,
+  renderTemplate
+} from "./render.js";
 import {
   isValidEmail,
   normalizeEmail,
   positiveInteger,
   publicSmtpSettings
 } from "./validators.js";
+import { nextScheduleDelay } from "./scheduling.js";
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
 const globalMaxPerMinute = Number(process.env.GLOBAL_MAX_EMAILS_PER_MINUTE || 60);
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 2 * 1024 * 1024 }
+  limits: { fileSize: 4 * 1024 * 1024, files: 21 }
 });
 
 const activeCampaigns = new Set();
@@ -30,7 +44,7 @@ const scheduledTimers = new Map();
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "12mb" }));
 app.use(
   "/api",
   rateLimit({
@@ -54,9 +68,10 @@ function asyncHandler(handler) {
   };
 }
 
-function apiError(message, status = 400) {
+function apiError(message, status = 400, details = null) {
   const error = new Error(message);
   error.status = status;
+  error.details = details;
   return error;
 }
 
@@ -74,6 +89,150 @@ function pickField(row, aliases) {
     normalizedAliases.includes(normalizeHeader(key))
   );
   return entry ? String(entry[1] ?? "").trim() : "";
+}
+
+function parseJson(value, fallback = {}) {
+  try {
+    return value ? JSON.parse(value) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeFields(row) {
+  const fields = {};
+  Object.entries(row || {}).forEach(([key, value]) => {
+    const normalized = normalizeVariableKey(key);
+    if (normalized) fields[normalized] = String(value ?? "").trim();
+  });
+  return fields;
+}
+
+function htmlToText(html) {
+  return String(html || "")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<br\s*\/?\s*>/gi, "\n")
+    .replace(/<\/(p|div|h1|h2|h3|li|td|tr)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0?39;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function templateFromUpload(file) {
+  const html = file.buffer.toString("utf8");
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = titleMatch
+    ? htmlToText(titleMatch[1])
+    : file.originalname.replace(/\.html?$/i, "").replaceAll("_", " ");
+  return {
+    name: file.originalname.replace(/\.html?$/i, "").replaceAll("_", " "),
+    source_filename: file.originalname,
+    subject: title,
+    body_text: htmlToText(html),
+    body_html: html,
+    variables: extractVariables({
+      subject: title,
+      body_text: "",
+      body_html: html
+    })
+  };
+}
+
+function parseEventCsv(buffer, eventId) {
+  const records = parse(buffer.toString("utf8"), {
+    bom: true,
+    columns: true,
+    skip_empty_lines: true,
+    trim: true,
+    relax_column_count: true
+  });
+  const seenEmails = new Set();
+  const existingMemberships = new Set(
+    db
+      .prepare(`
+        SELECT lower(c.email) AS email
+        FROM event_contacts ec
+        JOIN contacts c ON c.id = ec.contact_id
+        WHERE ec.event_id = ?
+      `)
+      .all(eventId)
+      .map((row) => row.email)
+  );
+  const contacts = [];
+  const invalidRows = [];
+
+  records.forEach((row, index) => {
+    const fields = normalizeFields(row);
+    const name = pickField(row, ["name", "nome"]);
+    const email = normalizeEmail(pickField(row, ["email", "e-mail", "mail"]));
+    const company = pickField(row, ["company", "empresa", "companhia"]);
+    const groupName = pickField(row, ["grupo", "group", "segmento"]);
+    const templateKey = pickField(row, [
+      "modelo_email",
+      "modelo email",
+      "template",
+      "template_file"
+    ]);
+    const errors = [];
+    const warnings = [];
+
+    if (!name) errors.push("Nome em falta");
+    if (!email) errors.push("Email em falta");
+    if (email && !isValidEmail(email)) errors.push("Email inválido");
+    if (email && seenEmails.has(email)) errors.push("Email duplicado no CSV");
+    if (email && existingMemberships.has(email)) {
+      warnings.push("Participação existente; os dados serão atualizados");
+    }
+
+    const candidate = {
+      row: index + 2,
+      name,
+      email,
+      company,
+      group_name: groupName,
+      template_key: templateKey,
+      fields,
+      warnings
+    };
+
+    if (errors.length > 0) {
+      invalidRows.push({ ...candidate, errors });
+      return;
+    }
+
+    seenEmails.add(email);
+    contacts.push(candidate);
+  });
+
+  const groups = Object.entries(
+    [...contacts, ...invalidRows].reduce((counts, contact) => {
+      const key = contact.group_name || "Sem grupo";
+      counts[key] = (counts[key] || 0) + 1;
+      return counts;
+    }, {})
+  ).map(([name, count]) => ({ name, count }));
+
+  return {
+    contacts,
+    invalidRows,
+    columns: records[0] ? Object.keys(records[0]) : [],
+    groups,
+    summary: {
+      totalRows: records.length,
+      valid: contacts.length,
+      invalid: invalidRows.length,
+      existing: contacts.filter((contact) => contact.warnings.length > 0).length
+    }
+  };
 }
 
 function parseContactsCsv(buffer) {
@@ -141,6 +300,10 @@ function createTransport(settings, password) {
     auth: {
       user: settings.from_email,
       pass: password
+    },
+    family: 4,
+    tls: {
+      rejectUnauthorized: false
     },
     connectionTimeout: 10000,
     greetingTimeout: 10000,
@@ -219,18 +382,40 @@ async function runCampaign(campaignId) {
 
     for (let index = 0; index < jobs.length; index += 1) {
       const job = jobs[index];
+      const mergeData = parseJson(job.merge_data_json);
       const rendered = renderTemplate(
         {
-          subject: campaign.template_subject,
-          body_text: campaign.template_body_text,
-          body_html: campaign.template_body_html
+          subject: job.template_subject || campaign.template_subject,
+          body_text: job.template_body_text || campaign.template_body_text,
+          body_html: job.template_body_html || campaign.template_body_html
         },
         {
           name: job.recipient_name,
           email: job.recipient_email,
           company: job.recipient_company
-        }
+        },
+        mergeData
       );
+
+      if (rendered.missingVariables.length > 0) {
+        db.prepare(`
+          UPDATE email_jobs
+          SET status = 'failed', error = ?, updated_at = ?
+          WHERE id = ?
+        `).run(
+          `Campos em falta: ${rendered.missingVariables.join(", ")}`,
+          nowIso(),
+          job.id
+        );
+        logSmtp(
+          campaignId,
+          job.id,
+          "error",
+          `Envio bloqueado por campos em falta: ${rendered.missingVariables.join(", ")}`
+        );
+        refreshCampaignStats(campaignId);
+        continue;
+      }
 
       try {
         await transporter.sendMail({
@@ -289,10 +474,13 @@ function scheduleCampaign(campaignId, scheduledAt) {
     clearTimeout(scheduledTimers.get(campaignId));
   }
 
-  const targetTime = scheduledAt ? new Date(scheduledAt).getTime() : Date.now();
-  const delay = Math.max(0, targetTime - Date.now());
+  const { targetTime, delay } = nextScheduleDelay(scheduledAt);
   const timer = setTimeout(() => {
-    runCampaign(campaignId);
+    if (targetTime > Date.now()) {
+      scheduleCampaign(campaignId, scheduledAt);
+    } else {
+      runCampaign(campaignId);
+    }
   }, delay);
 
   scheduledTimers.set(campaignId, timer);
@@ -314,7 +502,533 @@ app.get("/api/health", (request, response) => {
   response.json({ ok: true, db: "sqlite", time: nowIso() });
 });
 
+app.get("/api/events", (request, response) => {
+  response.json({ events: listEvents() });
+});
+
+app.post(
+  "/api/events",
+  asyncHandler(async (request, response) => {
+    const name = String(request.body.name || "").trim();
+    const description = String(request.body.description || "").trim();
+    const eventDate = request.body.event_date
+      ? String(request.body.event_date)
+      : null;
+    const defaultVariables = request.body.default_variables || {};
+
+    if (!name) throw apiError("Dê um nome ao evento", 400);
+
+    const result = db.prepare(`
+      INSERT INTO events (
+        name, description, event_date, status, default_variables_json
+      )
+      VALUES (?, ?, ?, 'active', ?)
+    `).run(
+      name,
+      description || null,
+      eventDate,
+      JSON.stringify(defaultVariables)
+    );
+
+    response.status(201).json({ event: getEvent(Number(result.lastInsertRowid)) });
+  })
+);
+
+app.get("/api/events/:id", (request, response) => {
+  const eventId = Number(request.params.id);
+  const event = getEvent(eventId);
+  if (!event) {
+    response.status(404).json({ error: "Evento não encontrado" });
+    return;
+  }
+  const templates = db.prepare(`
+    SELECT * FROM templates
+    WHERE event_id = ?
+    ORDER BY datetime(updated_at) DESC, id DESC
+  `).all(eventId);
+  response.json({
+    event: {
+      ...event,
+      templates,
+      campaigns: listCampaigns(eventId)
+    }
+  });
+});
+
+app.put(
+  "/api/events/:id",
+  asyncHandler(async (request, response) => {
+    const eventId = Number(request.params.id);
+    const current = getEvent(eventId);
+    if (!current) throw apiError("Evento não encontrado", 404);
+
+    const name = String(request.body.name ?? current.name).trim();
+    const description = String(
+      request.body.description ?? current.description ?? ""
+    ).trim();
+    const eventDate =
+      request.body.event_date === undefined
+        ? current.event_date
+        : request.body.event_date || null;
+    const defaultVariables =
+      request.body.default_variables ?? current.default_variables;
+
+    if (!name) throw apiError("Dê um nome ao evento", 400);
+
+    db.prepare(`
+      UPDATE events
+      SET name = ?, description = ?, event_date = ?,
+        default_variables_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      name,
+      description || null,
+      eventDate,
+      JSON.stringify(defaultVariables || {}),
+      nowIso(),
+      eventId
+    );
+
+    response.json({ event: getEvent(eventId) });
+  })
+);
+
+app.post("/api/events/:id/archive", (request, response) => {
+  const eventId = Number(request.params.id);
+  const result = db.prepare(`
+    UPDATE events
+    SET status = 'archived', updated_at = ?
+    WHERE id = ?
+  `).run(nowIso(), eventId);
+  if (result.changes === 0) {
+    response.status(404).json({ error: "Evento não encontrado" });
+    return;
+  }
+  response.json({ event: getEvent(eventId) });
+});
+
+app.post(
+  "/api/events/:id/import/preview",
+  upload.fields([
+    { name: "file", maxCount: 1 },
+    { name: "templates", maxCount: 20 }
+  ]),
+  asyncHandler(async (request, response) => {
+    const eventId = Number(request.params.id);
+    if (!getEvent(eventId)) throw apiError("Evento não encontrado", 404);
+
+    const csvFile = request.files?.file?.[0];
+    if (!csvFile) throw apiError("Escolha um ficheiro CSV", 400);
+
+    const preview = parseEventCsv(csvFile.buffer, eventId);
+    const templates = (request.files?.templates || [])
+      .filter((file) => /\.html?$/i.test(file.originalname))
+      .map(templateFromUpload);
+    const templateNames = new Set(
+      templates.map((template) => template.source_filename.toLowerCase())
+    );
+
+    const addTemplateMatch = (contact) => ({
+      ...contact,
+      template_matched:
+        !contact.template_key ||
+        templateNames.has(contact.template_key.toLowerCase()) ||
+        Boolean(
+          db
+            .prepare(`
+              SELECT id FROM templates
+              WHERE event_id = ? AND lower(source_filename) = lower(?)
+            `)
+            .get(eventId, contact.template_key)
+        )
+    });
+    preview.contacts = preview.contacts.map(addTemplateMatch);
+    preview.invalidRows = preview.invalidRows.map(addTemplateMatch);
+
+    response.json({ ...preview, templates });
+  })
+);
+
+app.post(
+  "/api/events/:id/import",
+  asyncHandler(async (request, response) => {
+    const eventId = Number(request.params.id);
+    if (!getEvent(eventId)) throw apiError("Evento não encontrado", 404);
+
+    const contacts = Array.isArray(request.body.contacts)
+      ? request.body.contacts
+      : [];
+    const templates = Array.isArray(request.body.templates)
+      ? request.body.templates
+      : [];
+    if (contacts.length === 0) {
+      throw apiError("Não há destinatários válidos para importar", 400);
+    }
+
+    let imported = 0;
+    let updated = 0;
+    let templateCount = 0;
+    const templateMap = new Map();
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      templates.forEach((template) => {
+        const filename = String(template.source_filename || "").trim();
+        const name = String(template.name || filename || "Modelo importado").trim();
+        const subject = String(template.subject || name).trim();
+        const bodyText = String(
+          template.body_text || htmlToText(template.body_html)
+        ).trim();
+        const bodyHtml = String(template.body_html || "").trim();
+        if (!filename || !bodyHtml) return;
+
+        const existing = db.prepare(`
+          SELECT id FROM templates
+          WHERE event_id = ? AND lower(source_filename) = lower(?)
+        `).get(eventId, filename);
+        let templateId;
+        if (existing) {
+          db.prepare(`
+            UPDATE templates
+            SET name = ?, subject = ?, body_text = ?, body_html = ?,
+              updated_at = ?
+            WHERE id = ?
+          `).run(name, subject, bodyText, bodyHtml, nowIso(), existing.id);
+          templateId = existing.id;
+        } else {
+          const result = db.prepare(`
+            INSERT INTO templates (
+              event_id, source_filename, name, subject, body_text, body_html
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(eventId, filename, name, subject, bodyText, bodyHtml);
+          templateId = Number(result.lastInsertRowid);
+          templateCount += 1;
+        }
+        templateMap.set(filename.toLowerCase(), templateId);
+      });
+
+      db.prepare(`
+        SELECT id, source_filename FROM templates
+        WHERE event_id = ? AND source_filename IS NOT NULL
+      `).all(eventId).forEach((template) => {
+        templateMap.set(template.source_filename.toLowerCase(), template.id);
+      });
+
+      const findContact = db.prepare(
+        "SELECT id FROM contacts WHERE lower(email) = lower(?)"
+      );
+      const insertContact = db.prepare(`
+        INSERT INTO contacts (name, email, company)
+        VALUES (?, ?, ?)
+      `);
+      const updateContact = db.prepare(`
+        UPDATE contacts
+        SET name = ?, company = COALESCE(NULLIF(?, ''), company)
+        WHERE id = ?
+      `);
+      const findMembership = db.prepare(`
+        SELECT id FROM event_contacts WHERE event_id = ? AND contact_id = ?
+      `);
+      const insertMembership = db.prepare(`
+        INSERT INTO event_contacts (
+          event_id, contact_id, group_name, template_key, template_id,
+          selected_for_email, fields_json
+        )
+        VALUES (?, ?, ?, ?, ?, 1, ?)
+      `);
+      const updateMembership = db.prepare(`
+        UPDATE event_contacts
+        SET group_name = ?, template_key = ?, template_id = ?,
+          selected_for_email = 1, fields_json = ?, updated_at = ?
+        WHERE id = ?
+      `);
+
+      contacts.forEach((contact) => {
+        const name = String(contact.name || "").trim();
+        const email = normalizeEmail(contact.email);
+        const company = String(contact.company || "").trim();
+        if (!name || !isValidEmail(email)) return;
+
+        let contactRow = findContact.get(email);
+        if (contactRow) {
+          updateContact.run(name, company, contactRow.id);
+        } else {
+          const result = insertContact.run(name, email, company || null);
+          contactRow = { id: Number(result.lastInsertRowid) };
+        }
+
+        const templateKey = String(contact.template_key || "").trim();
+        const templateId = templateKey
+          ? templateMap.get(templateKey.toLowerCase()) || null
+          : null;
+        const fields = normalizeFields(contact.fields || {});
+        const membership = findMembership.get(eventId, contactRow.id);
+
+        if (membership) {
+          updateMembership.run(
+            String(contact.group_name || "").trim() || null,
+            templateKey || null,
+            templateId,
+            JSON.stringify(fields),
+            nowIso(),
+            membership.id
+          );
+          updated += 1;
+        } else {
+          insertMembership.run(
+            eventId,
+            contactRow.id,
+            String(contact.group_name || "").trim() || null,
+            templateKey || null,
+            templateId,
+            JSON.stringify(fields)
+          );
+          imported += 1;
+        }
+      });
+
+      db.prepare("UPDATE events SET updated_at = ? WHERE id = ?").run(
+        nowIso(),
+        eventId
+      );
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    response.json({
+      imported,
+      updated,
+      templatesImported: templateCount,
+      event: getEvent(eventId)
+    });
+  })
+);
+
+app.put(
+  "/api/events/:id/contacts/:eventContactId/template",
+  asyncHandler(async (request, response) => {
+    const eventId = Number(request.params.id);
+    const eventContactId = Number(request.params.eventContactId);
+    const templateId = request.body.templateId
+      ? Number(request.body.templateId)
+      : null;
+    if (templateId) {
+      const template = db.prepare(`
+        SELECT id FROM templates WHERE id = ? AND event_id = ?
+      `).get(templateId, eventId);
+      if (!template) throw apiError("Modelo não pertence a este evento", 400);
+    }
+    const result = db.prepare(`
+      UPDATE event_contacts
+      SET template_key = NULL, template_id = ?, updated_at = ?
+      WHERE id = ? AND event_id = ?
+    `).run(templateId, nowIso(), eventContactId, eventId);
+    if (result.changes === 0) throw apiError("Destinatário não encontrado", 404);
+    response.json({ contacts: listEventContacts(eventId) });
+  })
+);
+
+app.post(
+  "/api/events/:id/contacts",
+  asyncHandler(async (request, response) => {
+    const eventId = Number(request.params.id);
+    if (!getEvent(eventId)) throw apiError("Evento não encontrado", 404);
+
+    const name = String(request.body.name || "").trim();
+    const email = normalizeEmail(request.body.email || "");
+    const company = String(request.body.company || "").trim();
+    const groupName = String(request.body.group_name || request.body.groupName || "").trim();
+    const templateId = request.body.templateId || request.body.template_id
+      ? Number(request.body.templateId || request.body.template_id)
+      : null;
+    const selectedForEmail = request.body.selected_for_email === false ? 0 : 1;
+    const fields = normalizeFields(request.body.fields || {});
+
+    if (!name) throw apiError("Nome é obrigatório", 400);
+    if (!email) throw apiError("Email é obrigatório", 400);
+    if (!isValidEmail(email)) throw apiError("Email inválido", 400);
+    if (templateId) {
+      const template = db.prepare(`
+        SELECT id FROM templates WHERE id = ? AND event_id = ?
+      `).get(templateId, eventId);
+      if (!template) throw apiError("Modelo não pertence a este evento", 400);
+    }
+
+    let eventContactId;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const existingContact = db
+        .prepare("SELECT id FROM contacts WHERE lower(email) = lower(?)")
+        .get(email);
+      let contactId = existingContact?.id;
+      if (contactId) {
+        db.prepare(`
+          UPDATE contacts
+          SET name = ?, company = ?
+          WHERE id = ?
+        `).run(name, company || null, contactId);
+      } else {
+        const result = db.prepare(`
+          INSERT INTO contacts (name, email, company)
+          VALUES (?, ?, ?)
+        `).run(name, email, company || null);
+        contactId = Number(result.lastInsertRowid);
+      }
+
+      const membership = db.prepare(`
+        SELECT id FROM event_contacts WHERE event_id = ? AND contact_id = ?
+      `).get(eventId, contactId);
+
+      if (membership) {
+        db.prepare(`
+          UPDATE event_contacts
+          SET group_name = ?, template_key = NULL, template_id = ?, selected_for_email = ?,
+            fields_json = ?, updated_at = ?
+          WHERE id = ?
+        `).run(
+          groupName || null,
+          templateId,
+          selectedForEmail,
+          JSON.stringify(fields),
+          nowIso(),
+          membership.id
+        );
+        eventContactId = membership.id;
+      } else {
+        const result = db.prepare(`
+          INSERT INTO event_contacts (
+            event_id, contact_id, group_name, template_id,
+            selected_for_email, fields_json
+          )
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(
+          eventId,
+          contactId,
+          groupName || null,
+          templateId,
+          selectedForEmail,
+          JSON.stringify(fields)
+        );
+        eventContactId = Number(result.lastInsertRowid);
+      }
+
+      db.prepare("UPDATE events SET updated_at = ? WHERE id = ?").run(nowIso(), eventId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    response.status(201).json({
+      contact: listEventContacts(eventId).find(
+        (contact) => contact.event_contact_id === eventContactId
+      ),
+      contacts: listEventContacts(eventId)
+    });
+  })
+);
+
+app.put(
+  "/api/events/:id/contacts/:eventContactId",
+  asyncHandler(async (request, response) => {
+    const eventId = Number(request.params.id);
+    const eventContactId = Number(request.params.eventContactId);
+    const membership = db.prepare(`
+      SELECT ec.*, c.id AS contact_id
+      FROM event_contacts ec
+      JOIN contacts c ON c.id = ec.contact_id
+      WHERE ec.id = ? AND ec.event_id = ?
+    `).get(eventContactId, eventId);
+    if (!membership) throw apiError("Destinatário não encontrado", 404);
+
+    const name = String(request.body.name || "").trim();
+    const email = normalizeEmail(request.body.email || "");
+    const company = String(request.body.company || "").trim();
+    const groupName = String(request.body.group_name || request.body.groupName || "").trim();
+    const templateId = request.body.templateId || request.body.template_id
+      ? Number(request.body.templateId || request.body.template_id)
+      : null;
+    const selectedForEmail = request.body.selected_for_email === false ? 0 : 1;
+    const fields = normalizeFields(request.body.fields || {});
+
+    if (!name) throw apiError("Nome é obrigatório", 400);
+    if (!email) throw apiError("Email é obrigatório", 400);
+    if (!isValidEmail(email)) throw apiError("Email inválido", 400);
+    if (templateId) {
+      const template = db.prepare(`
+        SELECT id FROM templates WHERE id = ? AND event_id = ?
+      `).get(templateId, eventId);
+      if (!template) throw apiError("Modelo não pertence a este evento", 400);
+    }
+
+    const emailOwner = db.prepare(`
+      SELECT id FROM contacts WHERE lower(email) = lower(?) AND id <> ?
+    `).get(email, membership.contact_id);
+    if (emailOwner) throw apiError("Este email já pertence a outro contacto", 400);
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare(`
+        UPDATE contacts
+        SET name = ?, email = ?, company = ?
+        WHERE id = ?
+      `).run(name, email, company || null, membership.contact_id);
+
+      db.prepare(`
+        UPDATE event_contacts
+        SET group_name = ?, template_key = NULL, template_id = ?, selected_for_email = ?,
+          fields_json = ?, updated_at = ?
+        WHERE id = ? AND event_id = ?
+      `).run(
+        groupName || null,
+        templateId,
+        selectedForEmail,
+        JSON.stringify(fields),
+        nowIso(),
+        eventContactId,
+        eventId
+      );
+
+      db.prepare("UPDATE events SET updated_at = ? WHERE id = ?").run(nowIso(), eventId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    response.json({
+      contact: listEventContacts(eventId).find(
+        (contact) => contact.event_contact_id === eventContactId
+      ),
+      contacts: listEventContacts(eventId)
+    });
+  })
+);
+
+app.delete(
+  "/api/events/:id/contacts/:eventContactId",
+  asyncHandler(async (request, response) => {
+    const eventId = Number(request.params.id);
+    const eventContactId = Number(request.params.eventContactId);
+    const result = db.prepare(`
+      DELETE FROM event_contacts
+      WHERE id = ? AND event_id = ?
+    `).run(eventContactId, eventId);
+    if (result.changes === 0) throw apiError("Destinatário não encontrado", 404);
+    db.prepare("UPDATE events SET updated_at = ? WHERE id = ?").run(nowIso(), eventId);
+    response.json({ deleted: result.changes, contacts: listEventContacts(eventId) });
+  })
+);
+
 app.get("/api/contacts", (request, response) => {
+  const eventId = Number(request.query.eventId || 0);
+  if (eventId) {
+    response.json({ contacts: listEventContacts(eventId) });
+    return;
+  }
   const contacts = db.prepare(`
     SELECT *
     FROM contacts
@@ -407,11 +1121,17 @@ app.post(
 
 
 app.get("/api/templates", (request, response) => {
-  const templates = db.prepare(`
-    SELECT *
-    FROM templates
-    ORDER BY datetime(updated_at) DESC, id DESC
-  `).all();
+  const eventId = Number(request.query.eventId || 0);
+  const templates = eventId
+    ? db.prepare(`
+        SELECT * FROM templates
+        WHERE event_id = ?
+        ORDER BY datetime(updated_at) DESC, id DESC
+      `).all(eventId)
+    : db.prepare(`
+        SELECT * FROM templates
+        ORDER BY datetime(updated_at) DESC, id DESC
+      `).all();
 
   response.json({ templates });
 });
@@ -423,15 +1143,20 @@ app.post(
     const subject = String(request.body.subject || "").trim();
     const bodyText = String(request.body.body_text || "").trim();
     const bodyHtml = String(request.body.body_html || "").trim();
+    const eventId = Number(request.body.event_id || request.body.eventId || 0) || null;
+    const sourceFilename = String(request.body.source_filename || "").trim() || null;
 
     if (!name || !subject || !bodyText) {
       throw apiError("Nome, assunto e texto são obrigatórios", 400);
     }
+    if (eventId && !getEvent(eventId)) throw apiError("Evento não encontrado", 404);
 
     const result = db.prepare(`
-      INSERT INTO templates (name, subject, body_text, body_html)
-      VALUES (?, ?, ?, ?)
-    `).run(name, subject, bodyText, bodyHtml);
+      INSERT INTO templates (
+        event_id, source_filename, name, subject, body_text, body_html
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(eventId, sourceFilename, name, subject, bodyText, bodyHtml);
 
     const template = db.prepare("SELECT * FROM templates WHERE id = ?").get(result.lastInsertRowid);
     response.status(201).json({ template });
@@ -446,6 +1171,7 @@ app.put(
     const subject = String(request.body.subject || "").trim();
     const bodyText = String(request.body.body_text || "").trim();
     const bodyHtml = String(request.body.body_html || "").trim();
+    const eventId = Number(request.body.event_id || request.body.eventId || 0) || null;
 
     if (!name || !subject || !bodyText) {
       throw apiError("Nome, assunto e texto são obrigatórios", 400);
@@ -453,9 +1179,10 @@ app.put(
 
     const result = db.prepare(`
       UPDATE templates
-      SET name = ?, subject = ?, body_text = ?, body_html = ?, updated_at = ?
+      SET event_id = COALESCE(?, event_id), name = ?, subject = ?,
+        body_text = ?, body_html = ?, updated_at = ?
       WHERE id = ?
-    `).run(name, subject, bodyText, bodyHtml, nowIso(), id);
+    `).run(eventId, name, subject, bodyText, bodyHtml, nowIso(), id);
 
     if (result.changes === 0) throw apiError("Template não encontrado", 404);
 
@@ -470,7 +1197,15 @@ app.delete("/api/templates/:id", (request, response) => {
 });
 
 app.post("/api/templates/preview", (request, response) => {
-  const sampleContact = request.body.contact || {
+  const eventId = Number(request.body.eventId || request.body.event_id || 0);
+  const eventContactId = Number(request.body.eventContactId || 0);
+  const event = eventId ? getEvent(eventId) : null;
+  const eventContact = eventContactId
+    ? event?.contacts.find(
+        (contact) => contact.event_contact_id === eventContactId
+      )
+    : null;
+  const sampleContact = eventContact || request.body.contact || {
     name: "João Silva",
     email: "joao@email.com",
     company: "Empresa Demo"
@@ -482,11 +1217,73 @@ app.post("/api/templates/preview", (request, response) => {
       body_text: request.body.body_text,
       body_html: request.body.body_html
     },
-    sampleContact
+    sampleContact,
+    eventContact?.fields || request.body.fields || {},
+    {
+      ...(event?.default_variables || {}),
+      ...(request.body.globals || {})
+    }
   );
 
-  response.json({ rendered });
+  const fieldKeys = event?.contacts.flatMap((contact) =>
+    Object.keys(contact.fields || {})
+  ) || [];
+  response.json({
+    rendered,
+    variables: availableVariables(fieldKeys)
+  });
 });
+
+app.post(
+  "/api/events/:id/templates/import",
+  upload.array("templates", 20),
+  asyncHandler(async (request, response) => {
+    const eventId = Number(request.params.id);
+    if (!getEvent(eventId)) throw apiError("Evento não encontrado", 404);
+    const files = (request.files || []).filter((file) =>
+      /\.html?$/i.test(file.originalname)
+    );
+    if (files.length === 0) throw apiError("Escolha pelo menos um ficheiro HTML", 400);
+
+    const templates = files.map(templateFromUpload).map((template) => {
+      const existing = db.prepare(`
+        SELECT id FROM templates
+        WHERE event_id = ? AND lower(source_filename) = lower(?)
+      `).get(eventId, template.source_filename);
+      if (existing) {
+        db.prepare(`
+          UPDATE templates
+          SET name = ?, subject = ?, body_text = ?, body_html = ?, updated_at = ?
+          WHERE id = ?
+        `).run(
+          template.name,
+          template.subject,
+          template.body_text,
+          template.body_html,
+          nowIso(),
+          existing.id
+        );
+        return db.prepare("SELECT * FROM templates WHERE id = ?").get(existing.id);
+      }
+      const result = db.prepare(`
+        INSERT INTO templates (
+          event_id, source_filename, name, subject, body_text, body_html
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        eventId,
+        template.source_filename,
+        template.name,
+        template.subject,
+        template.body_text,
+        template.body_html
+      );
+      return db.prepare("SELECT * FROM templates WHERE id = ?").get(result.lastInsertRowid);
+    });
+
+    response.status(201).json({ templates });
+  })
+);
 
 app.get("/api/smtp-settings", (request, response) => {
   response.json({ settings: publicSmtpSettings(getStoredSmtpSettings()) });
@@ -564,7 +1361,8 @@ app.post(
 );
 
 app.get("/api/campaigns", (request, response) => {
-  response.json({ campaigns: listCampaigns() });
+  const eventId = Number(request.query.eventId || 0);
+  response.json({ campaigns: listCampaigns(eventId || null) });
 });
 
 app.get("/api/campaigns/:id", (request, response) => {
@@ -585,18 +1383,21 @@ app.post(
       throw apiError("Confirmação obrigatória antes de enviar", 400);
     }
 
-    const templateId = Number(request.body.templateId || request.body.template_id);
+    const eventId = Number(request.body.eventId || request.body.event_id || 0) || null;
+    const templateId = Number(request.body.templateId || request.body.template_id || 0) || null;
+    const templateMode =
+      request.body.templateMode === "assigned" ? "assigned" : "single";
     const intervalSeconds = Math.min(3600, positiveInteger(request.body.intervalSeconds, 5));
     const requestedMaxPerMinute = positiveInteger(request.body.maxPerMinute, 30);
     const scheduledAt = request.body.scheduledAt ? new Date(request.body.scheduledAt) : null;
     const campaignName = String(request.body.name || `Campanha ${new Date().toLocaleString("pt-PT")}`).trim();
+    if (scheduledAt && Number.isNaN(scheduledAt.getTime())) {
+      throw apiError("A data de agendamento não é válida", 400);
+    }
 
     if (requestedMaxPerMinute > globalMaxPerMinute) {
       throw apiError(`O limite máximo global é ${globalMaxPerMinute} emails/min`, 400);
     }
-
-    const template = db.prepare("SELECT * FROM templates WHERE id = ?").get(templateId);
-    if (!template) throw apiError("Template não encontrado", 404);
 
     const smtp = getStoredSmtpSettings();
     if (!smtp) throw apiError("Configure SMTP antes de enviar", 400);
@@ -607,24 +1408,103 @@ app.post(
     const ids = Array.isArray(request.body.contactIds)
       ? request.body.contactIds.map(Number).filter((id) => Number.isInteger(id) && id > 0)
       : [];
-
-    let contacts;
-    if (ids.length > 0) {
-      const placeholders = ids.map(() => "?").join(",");
-      contacts = db.prepare(`
-        SELECT *
-        FROM contacts
-        WHERE id IN (${placeholders})
-        ORDER BY id ASC
-      `).all(...ids);
-    } else {
-      contacts = db.prepare("SELECT * FROM contacts ORDER BY id ASC").all();
+    const groups = Array.isArray(request.body.groups)
+      ? request.body.groups.map((group) => String(group))
+      : [];
+    const requestedGlobals = normalizeFields(request.body.globals || {});
+    if (request.body.signature) {
+      requestedGlobals.ASSINATURA = String(request.body.signature).trim();
     }
 
-    if (contacts.length === 0) throw apiError("Importe contactos antes de enviar", 400);
+    let event = null;
+    let contacts = [];
+    let globals = requestedGlobals;
+    if (eventId) {
+      event = getEvent(eventId);
+      if (!event) throw apiError("Evento não encontrado", 404);
+      globals = {
+        ...normalizeFields(event.default_variables || {}),
+        ...requestedGlobals
+      };
+      contacts = event.contacts.filter((contact) => {
+        const idMatch = ids.length === 0 || ids.includes(contact.id);
+        const groupMatch =
+          groups.length === 0 || groups.includes(contact.group_name || "Sem grupo");
+        return contact.selected_for_email && idMatch && groupMatch;
+      });
+    } else {
+      if (ids.length > 0) {
+        const placeholders = ids.map(() => "?").join(",");
+        contacts = db.prepare(`
+          SELECT *
+          FROM contacts
+          WHERE id IN (${placeholders})
+          ORDER BY id ASC
+        `).all(...ids);
+      } else {
+        contacts = db.prepare("SELECT * FROM contacts ORDER BY id ASC").all();
+      }
+    }
+
+    if (contacts.length === 0) {
+      throw apiError("Selecione pelo menos um destinatário para esta campanha", 400);
+    }
+
+    const templates = new Map(
+      db.prepare("SELECT * FROM templates").all().map((template) => [
+        template.id,
+        template
+      ])
+    );
+    const singleTemplate = templateId ? templates.get(templateId) : null;
+    if (templateMode === "single" && !singleTemplate) {
+      throw apiError("Escolha um modelo para a campanha", 400);
+    }
+
+    const candidates = contacts.map((contact) => {
+      const selectedTemplate =
+        templateMode === "assigned"
+          ? templates.get(Number(contact.template_id))
+          : singleTemplate;
+      const mergeFields = {
+        ...(contact.fields || {}),
+        ...globals,
+        GRUPO: contact.group_name || contact.fields?.GRUPO || ""
+      };
+      const rendered = selectedTemplate
+        ? renderTemplate(selectedTemplate, contact, mergeFields)
+        : null;
+      return {
+        contact,
+        template: selectedTemplate,
+        mergeFields,
+        missing: selectedTemplate
+          ? rendered.missingVariables
+          : ["MODELO_EMAIL"]
+      };
+    });
+
+    const invalidCandidates = candidates
+      .filter((candidate) => !candidate.template || candidate.missing.length > 0)
+      .map((candidate) => ({
+        name: candidate.contact.name,
+        email: candidate.contact.email,
+        template: candidate.template?.name || candidate.contact.template_key || "Sem modelo",
+        missing: candidate.missing
+      }));
+    if (invalidCandidates.length > 0) {
+      throw apiError(
+        `O envio foi bloqueado: ${invalidCandidates.length} destinatário(s) têm campos ou modelos em falta`,
+        400,
+        { invalidRecipients: invalidCandidates.slice(0, 100) }
+      );
+    }
 
     const status = scheduledAt && scheduledAt.getTime() > Date.now() ? "scheduled" : "queued";
     const scheduledAtIso = status === "scheduled" ? scheduledAt.toISOString() : null;
+    const representativeTemplate = candidates[0].template;
+    const campaignTemplateName =
+      templateMode === "assigned" ? "Vários modelos atribuídos" : representativeTemplate.name;
     let campaignId;
 
     db.exec("BEGIN IMMEDIATE");
@@ -633,41 +1513,54 @@ app.post(
         INSERT INTO campaigns (
           name, template_id, template_name, template_subject, template_body_text,
           template_body_html, smtp_from_email, scheduled_at, status, total, queued,
-          interval_seconds, max_per_minute
+          interval_seconds, max_per_minute, event_id, template_mode,
+          global_variables_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         campaignName,
-        template.id,
-        template.name,
-        template.subject,
-        template.body_text,
-        template.body_html,
+        templateMode === "single" ? representativeTemplate.id : null,
+        campaignTemplateName,
+        representativeTemplate.subject,
+        representativeTemplate.body_text,
+        representativeTemplate.body_html,
         smtp.from_email,
         scheduledAtIso,
         status,
-        contacts.length,
-        contacts.length,
+        candidates.length,
+        candidates.length,
         intervalSeconds,
-        requestedMaxPerMinute
+        requestedMaxPerMinute,
+        eventId,
+        templateMode,
+        JSON.stringify(globals)
       );
 
       campaignId = Number(campaignResult.lastInsertRowid);
 
       const insertJob = db.prepare(`
         INSERT OR IGNORE INTO email_jobs (
-          campaign_id, contact_id, recipient_name, recipient_email, recipient_company
+          campaign_id, contact_id, recipient_name, recipient_email,
+          recipient_company, template_id, template_name, template_subject,
+          template_body_text, template_body_html, merge_data_json, group_name
         )
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
-      contacts.forEach((contact) => {
+      candidates.forEach(({ contact, template, mergeFields }) => {
         insertJob.run(
           campaignId,
           contact.id,
           contact.name,
           contact.email,
-          contact.company
+          contact.company,
+          template.id,
+          template.name,
+          template.subject,
+          template.body_text,
+          template.body_html,
+          JSON.stringify(mergeFields),
+          contact.group_name || null
         );
       });
 
@@ -709,12 +1602,13 @@ app.use((error, request, response, next) => {
   }
 
   response.status(status).json({
-    error: error.message || "Erro interno"
+    error: error.message || "Erro interno",
+    ...(error.details ? { details: error.details } : {})
   });
 });
 
 resumePendingCampaigns();
 
 app.listen(port, () => {
-  console.log(`Smart Outreach Mailer API ready on http://localhost:${port}`);
+  console.log(`LifeInternet Mail Studio API ready on http://localhost:${port}`);
 });

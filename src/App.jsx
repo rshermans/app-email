@@ -1,46 +1,77 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  cloneElement,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import {
   AlertCircle,
-  CalendarClock,
+  Archive,
+  CalendarDays,
+  Check,
   CheckCircle2,
-  ChevronRight,
+  ChevronDown,
+  CircleUserRound,
   Clock3,
+  Code2,
   ContactRound,
   Eye,
+  FileCode2,
   FileText,
+  Gauge,
+  HelpCircle,
+  Inbox,
+  LayoutDashboard,
   Loader2,
   Mail,
-  Play,
+  Menu,
+  Monitor,
+  PanelLeftClose,
+  Pencil,
   Plus,
   RefreshCw,
   Save,
   Search,
   Send,
   ServerCog,
+  Settings,
   ShieldCheck,
+  Smartphone,
+  Sparkles,
   Trash2,
   Upload,
+  UserPlus,
+  UsersRound,
+  X,
   XCircle
 } from "lucide-react";
 import { api, formatDate, statusLabel } from "./utils/api.js";
 
-const steps = [
-  { label: "Contactos", icon: ContactRound },
-  { label: "Template", icon: FileText },
-  { label: "SMTP", icon: ServerCog },
-  { label: "Enviar", icon: Send }
+const navigation = [
+  { id: "overview", label: "Visão geral", icon: LayoutDashboard },
+  { id: "audience", label: "Público", icon: UsersRound },
+  { id: "templates", label: "Templates", icon: FileCode2 },
+  { id: "campaigns", label: "Campanhas", icon: Send },
+  { id: "settings", label: "Definições", icon: Settings }
 ];
 
 const emptyTemplate = {
   id: null,
+  event_id: null,
   name: "",
-  subject: "Olá {{name}},",
-  body_text: "Olá {{name}},\n\n",
-  body_html: "<p>Olá <strong>{{name}}</strong>,</p>"
+  subject: "",
+  body_text: "",
+  body_html: ""
 };
 
 const emptyCampaign = {
   name: "",
+  templateMode: "assigned",
+  templateId: "",
+  signature: "",
+  selectedGroups: [],
   sendMode: "now",
   scheduledAt: "",
   intervalSeconds: 5,
@@ -48,273 +79,1256 @@ const emptyCampaign = {
   confirm: false
 };
 
-const fallbackContact = {
-  name: "João Silva",
-  email: "joao@email.com",
-  company: "Empresa Demo"
-};
+function escapeMarkup(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function htmlForPreview(rendered) {
+  if (rendered?.html) return rendered.html;
+  return `<!doctype html><html lang="pt-PT"><head><meta charset="utf-8"><style>body{font-family:Arial,sans-serif;padding:28px;color:#12212b;line-height:1.6}pre{white-space:pre-wrap;font:inherit}</style></head><body><pre>${escapeMarkup(rendered?.text)}</pre></body></html>`;
+}
+
+function participantForm(contact = null) {
+  return {
+    event_contact_id: contact?.event_contact_id || null,
+    name: contact?.name || "",
+    email: contact?.email || "",
+    company: contact?.company || "",
+    group_name: contact?.group_name || "",
+    template_id: contact?.template_id || "",
+    selected_for_email: contact?.selected_for_email ?? true,
+    fieldsText: JSON.stringify(contact?.fields || {}, null, 2)
+  };
+}
 
 export default function App() {
-  const [step, setStep] = useState(0);
-  const [contacts, setContacts] = useState([]);
-  const [preview, setPreview] = useState(null);
-  const [templates, setTemplates] = useState([]);
-  const [templateForm, setTemplateForm] = useState(emptyTemplate);
-  const [renderedPreview, setRenderedPreview] = useState(null);
+  const [view, setView] = useState("overview");
+  const [events, setEvents] = useState([]);
+  const [event, setEvent] = useState(null);
+  const [eventId, setEventId] = useState(null);
   const [smtpSettings, setSmtpSettings] = useState(null);
-  const [smtpForm, setSmtpForm] = useState({
-    host: "",
-    port: 465,
-    from_email: "",
-    password: "",
-    secure: true,
-    max_per_minute: 30
-  });
-  const [campaigns, setCampaigns] = useState([]);
-  const [selectedCampaign, setSelectedCampaign] = useState(null);
-  const [campaignForm, setCampaignForm] = useState(emptyCampaign);
-  const [selectedContactIds, setSelectedContactIds] = useState([]);
-  const [busy, setBusy] = useState("");
+  const [busy, setBusy] = useState("initial");
   const [notice, setNotice] = useState(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
-  const [contactsSearch, setContactsSearch] = useState("");
-  const [contactsFilter, setContactsFilter] = useState("all"); // "all" | "selected" | "unselected"
-  const [sendSearch, setSendSearch] = useState("");
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-
-  const filteredContacts = useMemo(() => {
-    return contacts.filter((c) => {
-      const matchesSearch =
-        contactsSearch === "" ||
-        c.name.toLowerCase().includes(contactsSearch.toLowerCase()) ||
-        c.email.toLowerCase().includes(contactsSearch.toLowerCase()) ||
-        (c.company || "").toLowerCase().includes(contactsSearch.toLowerCase());
-      
-      const isSel = selectedContactIds.includes(c.id);
-      const matchesFilter =
-        contactsFilter === "all" ||
-        (contactsFilter === "selected" && isSel) ||
-        (contactsFilter === "unselected" && !isSel);
-
-      return matchesSearch && matchesFilter;
-    });
-  }, [contacts, contactsSearch, contactsFilter, selectedContactIds]);
-
-  const filteredSendContacts = useMemo(() => {
-    return contacts.filter((c) => {
-      return (
-        sendSearch === "" ||
-        c.name.toLowerCase().includes(sendSearch.toLowerCase()) ||
-        c.email.toLowerCase().includes(sendSearch.toLowerCase()) ||
-        (c.company || "").toLowerCase().includes(sendSearch.toLowerCase())
-      );
-    });
-  }, [contacts, sendSearch]);
-
-  const selectedTemplateId = templateForm.id || templates[0]?.id || "";
-  const selectedContacts = useMemo(
-    () => contacts.filter((contact) => selectedContactIds.includes(contact.id)),
-    [contacts, selectedContactIds]
-  );
-
-  const latestCampaign = campaigns[0];
-
-  const showNotice = useCallback((type, message) => {
-    setNotice({ type, message });
-    window.clearTimeout(showNotice.timeout);
-    showNotice.timeout = window.setTimeout(() => setNotice(null), 4500);
+  const announce = useCallback((type, message, details = null) => {
+    setNotice({ type, message, details });
+    window.clearTimeout(announce.timeout);
+    announce.timeout = window.setTimeout(() => setNotice(null), 6500);
   }, []);
 
-  const selectTemplate = useCallback((template) => {
-    if (!template) {
-      setTemplateForm(emptyTemplate);
-      setRenderedPreview(null);
-      return;
+  const loadEvent = useCallback(async (id, quiet = false) => {
+    if (!id) return;
+    if (!quiet) setBusy("event");
+    try {
+      const data = await api(`/api/events/${id}`);
+      setEvent(data.event);
+      setEventId(data.event.id);
+      window.localStorage.setItem("lifeinternet-mail-event", String(data.event.id));
+    } catch (error) {
+      announce("error", error.message);
+    } finally {
+      if (!quiet) setBusy("");
     }
+  }, [announce]);
 
-    setTemplateForm({
+  const loadEvents = useCallback(async (preferredId = null) => {
+    const data = await api("/api/events");
+    const nextEvents = data.events || [];
+    setEvents(nextEvents);
+    const stored = Number(window.localStorage.getItem("lifeinternet-mail-event"));
+    const nextId =
+      preferredId ||
+      (nextEvents.some((item) => item.id === stored) ? stored : null) ||
+      nextEvents.find((item) => item.status === "active")?.id ||
+      nextEvents[0]?.id;
+    if (nextId) await loadEvent(nextId);
+  }, [loadEvent]);
+
+  useEffect(() => {
+    async function start() {
+      setBusy("initial");
+      try {
+        const [eventsData, smtpData] = await Promise.all([
+          api("/api/events"),
+          api("/api/smtp-settings")
+        ]);
+        const nextEvents = eventsData.events || [];
+        setEvents(nextEvents);
+        setSmtpSettings(smtpData.settings);
+        const stored = Number(window.localStorage.getItem("lifeinternet-mail-event"));
+        const nextId =
+          (nextEvents.some((item) => item.id === stored) ? stored : null) ||
+          nextEvents.find((item) => item.status === "active")?.id ||
+          nextEvents[0]?.id;
+        if (nextId) await loadEvent(nextId, true);
+      } catch (error) {
+        announce("error", error.message);
+      } finally {
+        setBusy("");
+      }
+    }
+    start();
+  }, [announce, loadEvent]);
+
+  useEffect(() => {
+    if (!eventId) return undefined;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") loadEvent(eventId, true);
+    }, 7000);
+    return () => window.clearInterval(timer);
+  }, [eventId, loadEvent]);
+
+  const openView = (nextView) => {
+    setView(nextView);
+    setMobileMenuOpen(false);
+    requestAnimationFrame(() => document.querySelector("#page-title")?.focus());
+  };
+
+  async function handleEventCreated(nextEvent) {
+    setCreateOpen(false);
+    await loadEvents(nextEvent.id);
+    setView("audience");
+    announce("success", `Evento “${nextEvent.name}” criado. Agora importe o público.`);
+  }
+
+  async function refreshEverything(message) {
+    await Promise.all([loadEvents(eventId), loadEvent(eventId)]);
+    if (message) announce("success", message);
+  }
+
+  const readiness = [
+    {
+      label: "Público",
+      description: `${event?.contacts?.length || 0} destinatários`,
+      ready: (event?.contacts?.length || 0) > 0,
+      view: "audience"
+    },
+    {
+      label: "Templates",
+      description: `${event?.templates?.length || 0} modelos`,
+      ready: (event?.templates?.length || 0) > 0,
+      view: "templates"
+    },
+    {
+      label: "Servidor de envio",
+      description: smtpSettings ? "Ligação guardada" : "Por configurar",
+      ready: Boolean(smtpSettings),
+      view: "settings"
+    },
+    {
+      label: "Revisão e envio",
+      description: "Última verificação",
+      ready:
+        (event?.contacts?.length || 0) > 0 &&
+        (event?.templates?.length || 0) > 0 &&
+        Boolean(smtpSettings),
+      view: "campaigns"
+    }
+  ];
+
+  return (
+    <div className="app-shell">
+      <a className="skip-link" href="#main-content">Saltar para o conteúdo</a>
+      <aside className={`sidebar ${mobileMenuOpen ? "sidebar-open" : ""}`}>
+        <div className="brand-lockup">
+          <img
+            className="brand-logo"
+            src="/lifeinternet-brand.png"
+            alt="LifeInternet"
+          />
+          <div className="brand-product-line">
+            <span>Mail Studio</span>
+            <small>Campanhas inteligentes</small>
+          </div>
+          <button
+            className="icon-button sidebar-mobile-close"
+            type="button"
+            onClick={() => setMobileMenuOpen(false)}
+            aria-label="Fechar menu"
+          >
+            <PanelLeftClose size={20} />
+          </button>
+        </div>
+
+        <nav className="primary-nav" aria-label="Navegação principal">
+          {navigation.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.id}
+                className={view === item.id ? "nav-item nav-item-active" : "nav-item"}
+                type="button"
+                onClick={() => openView(item.id)}
+                aria-current={view === item.id ? "page" : undefined}
+              >
+                <Icon size={19} aria-hidden="true" />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="sidebar-footer">
+          <div className="startup-chip">
+            <Sparkles size={16} aria-hidden="true" />
+            <span>A LifeInternet Startup product</span>
+          </div>
+          <p>Comunicação humana, organizada e responsável.</p>
+        </div>
+      </aside>
+
+      {mobileMenuOpen && (
+        <button
+          className="sidebar-backdrop"
+          type="button"
+          aria-label="Fechar menu"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
+      <div className="workspace">
+        <header className="topbar">
+          <button
+            className="icon-button mobile-menu-button"
+            type="button"
+            onClick={() => setMobileMenuOpen(true)}
+            aria-label="Abrir menu"
+            aria-expanded={mobileMenuOpen}
+          >
+            <Menu size={22} />
+          </button>
+
+          <div className="event-switcher">
+            <label htmlFor="event-select">Evento atual</label>
+            <div className="select-wrap">
+              <select
+                id="event-select"
+                value={eventId || ""}
+                onChange={(changeEvent) => loadEvent(Number(changeEvent.target.value))}
+                disabled={events.length === 0}
+              >
+                {events.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}{item.status === "archived" ? " — arquivado" : ""}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown size={16} aria-hidden="true" />
+            </div>
+          </div>
+
+          <div className="topbar-actions">
+            <button className="button button-secondary" type="button" onClick={() => setCreateOpen(true)}>
+              <Plus size={17} aria-hidden="true" />
+              <span className="desktop-label">Novo evento</span>
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="Ajuda sobre esta página"
+              title="Ajuda"
+              onClick={() => announce("info", "Comece pelo público, confirme os templates e termine em Campanhas. O Mail Studio valida tudo antes do envio.")}
+            >
+              <HelpCircle size={20} />
+            </button>
+            <div className="avatar" aria-label="Espaço de trabalho local">
+              <CircleUserRound size={21} aria-hidden="true" />
+            </div>
+          </div>
+        </header>
+
+        <div className="live-region" aria-live="polite" aria-atomic="true">
+          {notice?.message || ""}
+        </div>
+
+        <main id="main-content" className="main-content" tabIndex="-1">
+          {notice && (
+            <Notice notice={notice} onClose={() => setNotice(null)} />
+          )}
+
+          {busy === "initial" || busy === "event" ? (
+            <LoadingState label="A preparar o seu espaço de trabalho" />
+          ) : !event ? (
+            <EmptyWorkspace onCreate={() => setCreateOpen(true)} />
+          ) : (
+            <>
+              {view === "overview" && (
+                <Overview
+                  event={event}
+                  events={events}
+                  readiness={readiness}
+                  onOpenView={openView}
+                  onCreate={() => setCreateOpen(true)}
+                  onImport={() => setImportOpen(true)}
+                  onSelectEvent={loadEvent}
+                />
+              )}
+              {view === "audience" && (
+                <Audience
+                  event={event}
+                  onImport={() => setImportOpen(true)}
+                  onRefresh={() => loadEvent(eventId)}
+                  announce={announce}
+                />
+              )}
+              {view === "templates" && (
+                <TemplateStudio
+                  event={event}
+                  onRefresh={() => loadEvent(eventId)}
+                  announce={announce}
+                />
+              )}
+              {view === "campaigns" && (
+                <Campaigns
+                  event={event}
+                  smtpSettings={smtpSettings}
+                  onRefresh={() => loadEvent(eventId)}
+                  onOpenSettings={() => openView("settings")}
+                  announce={announce}
+                />
+              )}
+              {view === "settings" && (
+                <SettingsView
+                  event={event}
+                  smtpSettings={smtpSettings}
+                  onSmtpSaved={setSmtpSettings}
+                  onEventSaved={(saved) => {
+                    setEvent((current) => ({ ...current, ...saved }));
+                    loadEvents(saved.id);
+                  }}
+                  onArchived={() => loadEvents()}
+                  announce={announce}
+                />
+              )}
+            </>
+          )}
+        </main>
+      </div>
+
+      <CreateEventModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreated={handleEventCreated}
+      />
+      <ImportModal
+        open={importOpen}
+        event={event}
+        onClose={() => setImportOpen(false)}
+        onImported={async (result) => {
+          setImportOpen(false);
+          await refreshEverything(
+            `${result.imported} novos e ${result.updated} atualizados. O público está pronto.`
+          );
+        }}
+      />
+    </div>
+  );
+}
+
+function PageHeading({ eyebrow, title, description, action }) {
+  return (
+    <div className="page-heading">
+      <div>
+        <p className="eyebrow">{eyebrow}</p>
+        <h1 id="page-title" tabIndex="-1">{title}</h1>
+        {description && <p>{description}</p>}
+      </div>
+      {action && <div className="page-actions">{action}</div>}
+    </div>
+  );
+}
+
+function Overview({ event, events, readiness, onOpenView, onCreate, onImport, onSelectEvent }) {
+  const delivered = event.campaigns.reduce((sum, campaign) => sum + Number(campaign.sent || 0), 0);
+  const failed = event.campaigns.reduce((sum, campaign) => sum + Number(campaign.failed || 0), 0);
+  return (
+    <div className="page-stack">
+      <PageHeading
+        eyebrow="O seu espaço de comunicação"
+        title={`Olá — vamos preparar “${event.name}”?`}
+        description="Todo o público, os modelos e os envios deste evento vivem aqui."
+        action={
+          <>
+            <button className="button button-secondary" type="button" onClick={onImport}>
+              <Upload size={17} aria-hidden="true" /> Importar público
+            </button>
+            <button className="button button-primary" type="button" onClick={() => onOpenView("campaigns")}>
+              <Send size={17} aria-hidden="true" /> Preparar campanha
+            </button>
+          </>
+        }
+      />
+
+      <section className="hero-panel" aria-labelledby="readiness-heading">
+        <div className="hero-copy">
+          <span className="hero-kicker"><Gauge size={17} /> Preparação do evento</span>
+          <h2 id="readiness-heading">Um percurso claro até ao envio</h2>
+          <p>Complete cada etapa ao seu ritmo. O Mail Studio verifica os dados antes de qualquer mensagem sair.</p>
+        </div>
+        <ol className="readiness-list">
+          {readiness.map((item, index) => (
+            <li key={item.label}>
+              <button type="button" onClick={() => onOpenView(item.view)}>
+                <span className={item.ready ? "step-number step-done" : "step-number"}>
+                  {item.ready ? <Check size={16} aria-label="Concluído" /> : index + 1}
+                </span>
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>{item.description}</small>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ol>
+      </section>
+
+      <section className="metrics-grid" aria-label="Resumo do evento">
+        <Metric icon={UsersRound} label="Destinatários" value={event.contacts.length} detail={`${event.groups.length} segmentos`} />
+        <Metric icon={FileCode2} label="Templates" value={event.templates.length} detail="Modelos neste evento" />
+        <Metric icon={Send} label="Entregues" value={delivered} detail={`${event.campaigns.length} campanhas`} />
+        <Metric icon={AlertCircle} label="Falhas" value={failed} detail={failed ? "Requer atenção" : "Tudo tranquilo"} tone={failed ? "warning" : "good"} />
+      </section>
+
+      <div className="content-grid content-grid-two">
+        <section className="panel">
+          <PanelTitle title="Distribuição do público" subtitle="Pessoas por segmento" />
+          {event.groups.length ? (
+            <div className="segment-list">
+              {event.groups.map((group) => {
+                const percentage = Math.round((group.count / event.contacts.length) * 100);
+                return (
+                  <div className="segment-row" key={group.name}>
+                    <div>
+                      <strong>{group.name}</strong>
+                      <span>{group.count} pessoas</span>
+                    </div>
+                    <div className="segment-progress" aria-label={`${percentage}% do público`}>
+                      <span style={{ width: `${percentage}%` }} />
+                    </div>
+                    <b>{percentage}%</b>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <FriendlyEmpty icon={ContactRound} title="Ainda não há público" text="Importe o CSV deste evento para ver os segmentos aqui." actionLabel="Importar público" onAction={onImport} />
+          )}
+        </section>
+
+        <section className="panel">
+          <PanelTitle title="Eventos recentes" subtitle="Continue de onde parou" action={<button className="text-button" type="button" onClick={onCreate}><Plus size={15} /> Novo</button>} />
+          <div className="event-list">
+            {events.slice(0, 5).map((item) => (
+              <button
+                className={item.id === event.id ? "event-row event-row-active" : "event-row"}
+                type="button"
+                key={item.id}
+                onClick={() => onSelectEvent(item.id)}
+              >
+                <span className="event-icon"><CalendarDays size={18} /></span>
+                <span>
+                  <strong>{item.name}</strong>
+                  <small>{item.contact_count} pessoas · {item.template_count} modelos</small>
+                </span>
+                <StatusPill status={item.status} />
+              </button>
+            ))}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function Audience({ event, onImport, onRefresh, announce }) {
+  const [search, setSearch] = useState("");
+  const [group, setGroup] = useState("all");
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingContact, setEditingContact] = useState(null);
+  const filtered = useMemo(() => event.contacts.filter((contact) => {
+    const term = search.toLowerCase();
+    const matchesSearch =
+      !term ||
+      contact.name.toLowerCase().includes(term) ||
+      contact.email.toLowerCase().includes(term);
+    const matchesGroup = group === "all" || (contact.group_name || "Sem grupo") === group;
+    return matchesSearch && matchesGroup;
+  }), [event.contacts, group, search]);
+  const selectedCount = event.contacts.filter((contact) => contact.selected_for_email).length;
+
+  function openEditor(contact = null) {
+    setEditingContact(contact);
+    setEditorOpen(true);
+  }
+
+  async function saveContact(values) {
+    const path = values.event_contact_id
+      ? `/api/events/${event.id}/contacts/${values.event_contact_id}`
+      : `/api/events/${event.id}/contacts`;
+    await api(path, {
+      method: values.event_contact_id ? "PUT" : "POST",
+      body: JSON.stringify(values)
+    });
+    setEditorOpen(false);
+    setEditingContact(null);
+    await onRefresh();
+    announce("success", values.event_contact_id ? "Participante atualizado." : "Participante adicionado ao evento.");
+  }
+
+  async function assignTemplate(contact, templateId) {
+    try {
+      await api(`/api/events/${event.id}/contacts/${contact.event_contact_id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          name: contact.name,
+          email: contact.email,
+          company: contact.company || "",
+          group_name: contact.group_name || "",
+          templateId: templateId || null,
+          selected_for_email: contact.selected_for_email,
+          fields: contact.fields || {}
+        })
+      });
+      await onRefresh();
+      announce("success", `Modelo atualizado para ${contact.name}.`);
+    } catch (error) {
+      announce("error", error.message);
+    }
+  }
+
+  async function toggleSelected(contact) {
+    try {
+      await api(`/api/events/${event.id}/contacts/${contact.event_contact_id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          name: contact.name,
+          email: contact.email,
+          company: contact.company || "",
+          group_name: contact.group_name || "",
+          templateId: contact.template_id || null,
+          selected_for_email: !contact.selected_for_email,
+          fields: contact.fields || {}
+        })
+      });
+      await onRefresh();
+      announce(
+        "success",
+        !contact.selected_for_email
+          ? `${contact.name} será incluído no envio.`
+          : `${contact.name} foi removido do envio.`
+      );
+    } catch (error) {
+      announce("error", error.message);
+    }
+  }
+
+  async function removeContact(contact) {
+    if (!window.confirm(`Remover ${contact.name} deste evento?`)) return;
+    try {
+      await api(`/api/events/${event.id}/contacts/${contact.event_contact_id}`, {
+        method: "DELETE"
+      });
+      await onRefresh();
+      announce("success", `${contact.name} removido deste evento.`);
+    } catch (error) {
+      announce("error", error.message);
+    }
+  }
+
+  return (
+    <div className="page-stack">
+      <PageHeading
+        eyebrow="Público do evento"
+        title="Pessoas e segmentos"
+        description={`${selectedCount} de ${event.contacts.length} participantes selecionados para envio.`}
+        action={
+          <>
+            <button className="button button-secondary" type="button" onClick={onImport}><Upload size={17} /> Importar público</button>
+            <button className="button button-primary" type="button" onClick={() => openEditor()}><UserPlus size={17} /> Adicionar participante</button>
+          </>
+        }
+      />
+      <section className="panel table-panel" aria-labelledby="audience-title">
+        <div className="toolbar">
+          <div className="search-field">
+            <Search size={18} aria-hidden="true" />
+            <label className="sr-only" htmlFor="audience-search">Pesquisar por nome ou email</label>
+            <input id="audience-search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Pesquisar nome ou email" />
+          </div>
+          <div className="toolbar-select">
+            <label htmlFor="group-filter">Segmento</label>
+            <select id="group-filter" value={group} onChange={(e) => setGroup(e.target.value)}>
+              <option value="all">Todos</option>
+              {event.groups.map((item) => <option key={item.name} value={item.name}>{item.name} ({item.count})</option>)}
+            </select>
+          </div>
+          <span className="result-count" aria-live="polite">{filtered.length} de {event.contacts.length}</span>
+        </div>
+        {filtered.length ? (
+          <div className="table-scroll">
+            <table>
+              <caption id="audience-title">Destinatários do evento {event.name}</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Envio</th>
+                  <th scope="col">Pessoa</th>
+                  <th scope="col">Segmento</th>
+                  <th scope="col">Modelo atribuído</th>
+                  <th scope="col">Dados</th>
+                  <th scope="col">Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((contact) => (
+                  <tr className={contact.selected_for_email ? "" : "row-muted"} key={contact.event_contact_id}>
+                    <td>
+                      <label className="selection-toggle">
+                        <input
+                          type="checkbox"
+                          checked={contact.selected_for_email}
+                          onChange={() => toggleSelected(contact)}
+                        />
+                        <span>{contact.selected_for_email ? "Selecionado" : "Não enviar"}</span>
+                      </label>
+                    </td>
+                    <td>
+                      <div className="person-cell">
+                        <span className="person-avatar" aria-hidden="true">{contact.name.slice(0, 1).toUpperCase()}</span>
+                        <span><strong>{contact.name}</strong><small>{contact.email}</small></span>
+                      </div>
+                    </td>
+                    <td><span className="soft-pill">{contact.group_name || "Sem grupo"}</span></td>
+                    <td>
+                      <label className="sr-only" htmlFor={`template-${contact.event_contact_id}`}>Modelo para {contact.name}</label>
+                      <select
+                        className={contact.template_id ? "inline-select" : "inline-select inline-select-warning"}
+                        id={`template-${contact.event_contact_id}`}
+                        value={contact.template_id || ""}
+                        onChange={(e) => assignTemplate(contact, Number(e.target.value) || null)}
+                      >
+                        <option value="">Sem modelo</option>
+                        {event.templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+                      </select>
+                    </td>
+                    <td><span className="data-count">{Object.keys(contact.fields || {}).length} campos</span></td>
+                    <td>
+                      <div className="row-actions">
+                        <button className="icon-button" type="button" onClick={() => openEditor(contact)} aria-label={`Editar ${contact.name}`} title="Editar">
+                          <Pencil size={16} />
+                        </button>
+                        <button className="icon-button danger-icon" type="button" onClick={() => removeContact(contact)} aria-label={`Remover ${contact.name}`} title="Remover">
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <FriendlyEmpty icon={Search} title="Nenhuma pessoa encontrada" text="Experimente alterar a pesquisa ou o segmento." />
+        )}
+      </section>
+      <ParticipantModal
+        open={editorOpen}
+        event={event}
+        contact={editingContact}
+        onClose={() => {
+          setEditorOpen(false);
+          setEditingContact(null);
+        }}
+        onSave={saveContact}
+      />
+    </div>
+  );
+}
+
+function ParticipantModal({ open, event, contact, onClose, onSave }) {
+  const [form, setForm] = useState(participantForm(contact));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (open) {
+      setForm(participantForm(contact));
+      setError("");
+    }
+  }, [contact, open]);
+
+  async function submit(eventSubmit) {
+    eventSubmit.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      let fields = {};
+      if (form.fieldsText.trim()) fields = JSON.parse(form.fieldsText);
+      await onSave({
+        event_contact_id: form.event_contact_id,
+        name: form.name,
+        email: form.email,
+        company: form.company,
+        group_name: form.group_name,
+        templateId: Number(form.template_id) || null,
+        selected_for_email: form.selected_for_email,
+        fields
+      });
+    } catch (eventError) {
+      setError(eventError instanceof SyntaxError ? "Campos extra deve ser JSON válido." : eventError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={contact ? "Editar participante" : "Adicionar participante"}
+      description={`Evento: ${event.name}`}
+    >
+      {error && <ErrorSummary message={error} />}
+      <form className="form-stack" onSubmit={submit}>
+        <div className="two-fields">
+          <Field label="Nome" htmlFor="participant-name">
+            <input id="participant-name" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          </Field>
+          <Field label="Email" htmlFor="participant-email">
+            <input id="participant-email" required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+          </Field>
+        </div>
+        <div className="two-fields">
+          <Field label="Empresa" htmlFor="participant-company">
+            <input id="participant-company" value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })} />
+          </Field>
+          <Field label="Segmento" htmlFor="participant-group">
+            <input id="participant-group" list="event-groups" value={form.group_name} onChange={(e) => setForm({ ...form, group_name: e.target.value })} placeholder="Sem grupo" />
+          </Field>
+        </div>
+        <datalist id="event-groups">
+          {event.groups.map((item) => <option key={item.name} value={item.name} />)}
+        </datalist>
+        <Field label="Modelo atribuído" htmlFor="participant-template">
+          <select id="participant-template" value={form.template_id} onChange={(e) => setForm({ ...form, template_id: e.target.value })}>
+            <option value="">Sem modelo</option>
+            {event.templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+          </select>
+        </Field>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={form.selected_for_email} onChange={(e) => setForm({ ...form, selected_for_email: e.target.checked })} />
+          Selecionado para envio de email
+        </label>
+        <Field label="Campos extra" htmlFor="participant-fields" hint='JSON opcional para variáveis dos templates, por exemplo {"CURSO":"IA"}.'>
+          <textarea className="code-input" id="participant-fields" rows="5" value={form.fieldsText} onChange={(e) => setForm({ ...form, fieldsText: e.target.value })} />
+        </Field>
+        <div className="modal-actions">
+          <button className="button button-secondary" type="button" onClick={onClose}>Cancelar</button>
+          <button className="button button-primary" type="submit" disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : <Save size={17} />} Guardar</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function TemplateStudio({ event, onRefresh, announce }) {
+  const [form, setForm] = useState(emptyTemplate);
+  const [dirty, setDirty] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [selectedContactId, setSelectedContactId] = useState(event.contacts[0]?.event_contact_id || "");
+  const [device, setDevice] = useState("desktop");
+  const [mobileTab, setMobileTab] = useState("editor");
+  const [activeField, setActiveField] = useState("body_html");
+  const [saving, setSaving] = useState(false);
+
+  const selectTemplate = useCallback((template, force = false) => {
+    if (!force && dirty && !window.confirm("Há alterações por guardar. Quer descartá-las?")) return;
+    setForm(template ? {
       id: template.id,
+      event_id: template.event_id,
       name: template.name,
       subject: template.subject,
       body_text: template.body_text,
       body_html: template.body_html || ""
-    });
-    setRenderedPreview(null);
-  }, []);
+    } : { ...emptyTemplate, event_id: event.id });
+    setDirty(false);
+  }, [dirty, event.id]);
 
-  const loadCampaigns = useCallback(async () => {
-    const data = await api("/api/campaigns");
-    setCampaigns(data.campaigns || []);
-  }, []);
+  useEffect(() => {
+    const currentStillExists = event.templates.find((template) => template.id === form.id);
+    if (!form.id && event.templates[0]) selectTemplate(event.templates[0], true);
+    else if (form.id && !currentStillExists) selectTemplate(event.templates[0] || null, true);
+  }, [event.templates]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const loadInitialData = useCallback(async () => {
-    setBusy("load");
-    try {
-      const [contactsData, templatesData, smtpData, campaignsData] = await Promise.all([
-        api("/api/contacts"),
-        api("/api/templates"),
-        api("/api/smtp-settings"),
-        api("/api/campaigns")
-      ]);
-
-      const nextContacts = contactsData.contacts || [];
-      const nextTemplates = templatesData.templates || [];
-
-      setContacts(nextContacts);
-      setTemplates(nextTemplates);
-      setCampaigns(campaignsData.campaigns || []);
-      setSelectedContactIds(nextContacts.map((contact) => contact.id));
-
-      if (nextTemplates.length > 0) {
-        selectTemplate(nextTemplates[0]);
+  useEffect(() => {
+    const warn = (eventBeforeUnload) => {
+      if (dirty) {
+        eventBeforeUnload.preventDefault();
+        eventBeforeUnload.returnValue = "";
       }
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
-      if (smtpData.settings) {
-        setSmtpSettings(smtpData.settings);
-        setSmtpForm({
-          host: smtpData.settings.host,
-          port: smtpData.settings.port,
-          from_email: smtpData.settings.from_email,
-          password: "",
-          secure: smtpData.settings.secure,
-          max_per_minute: smtpData.settings.max_per_minute
+  useEffect(() => {
+    if (!form.subject && !form.body_text && !form.body_html) {
+      setPreview(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setPreviewBusy(true);
+      try {
+        const data = await api("/api/templates/preview", {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            ...form,
+            eventId: event.id,
+            eventContactId: Number(selectedContactId) || null
+          })
         });
+        setPreview(data);
+      } catch (error) {
+        if (error.name !== "AbortError") announce("error", error.message);
+      } finally {
+        setPreviewBusy(false);
       }
-    } catch (error) {
-      showNotice("error", error.message);
-    } finally {
-      setBusy("");
-    }
-  }, [selectTemplate, showNotice]);
+    }, 350);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [announce, event.id, form, selectedContactId]);
 
-  useEffect(() => {
-    loadInitialData();
-  }, [loadInitialData]);
+  const update = (field, value) => {
+    setForm((current) => ({ ...current, [field]: value }));
+    setDirty(true);
+  };
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      loadCampaigns().catch(() => {});
-    }, 5000);
-
-    return () => window.clearInterval(timer);
-  }, [loadCampaigns]);
-
-  async function refreshContacts() {
-    const data = await api("/api/contacts");
-    const nextContacts = data.contacts || [];
-    setContacts(nextContacts);
-    setSelectedContactIds((current) => {
-      const nextIds = nextContacts.map((contact) => contact.id);
-      const currentStillExists = current.filter((id) => nextIds.includes(id));
-      return currentStillExists.length > 0 ? currentStillExists : nextIds;
-    });
-  }
-
-  async function handleCsvPreview(file) {
-    if (!file) return;
-
-    setBusy("preview");
-    setPreview(null);
+  async function save() {
+    setSaving(true);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const data = await api("/api/contacts/preview", {
-        method: "POST",
-        body: formData
-      });
-      setPreview(data);
-      showNotice("success", "CSV analisado");
-    } catch (error) {
-      showNotice("error", error.message);
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function importPreviewContacts() {
-    if (!preview?.validContacts?.length) return;
-
-    setBusy("import");
-    try {
-      const data = await api("/api/contacts/import", {
-        method: "POST",
-        body: JSON.stringify({ contacts: preview.validContacts })
-      });
-      await refreshContacts();
-      setPreview(null);
-      showNotice("success", `${data.imported} contactos importados`);
-    } catch (error) {
-      showNotice("error", error.message);
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function clearContacts() {
-    if (!window.confirm("Apagar todos os contactos importados?")) return;
-
-    setBusy("clearContacts");
-    try {
-      const data = await api("/api/contacts", { method: "DELETE" });
-      await refreshContacts();
-      setPreview(null);
-      showNotice("success", `${data.deleted} contactos apagados`);
-    } catch (error) {
-      showNotice("error", error.message);
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function saveTemplate() {
-    setBusy("template");
-    try {
-      const method = templateForm.id ? "PUT" : "POST";
-      const path = templateForm.id ? `/api/templates/${templateForm.id}` : "/api/templates";
+      const method = form.id ? "PUT" : "POST";
+      const path = form.id ? `/api/templates/${form.id}` : "/api/templates";
       const data = await api(path, {
         method,
-        body: JSON.stringify(templateForm)
+        body: JSON.stringify({ ...form, eventId: event.id })
       });
-      const templatesData = await api("/api/templates");
-      setTemplates(templatesData.templates || []);
-      selectTemplate(data.template);
-      showNotice("success", "Template guardado");
+      await onRefresh();
+      selectTemplate(data.template, true);
+      announce("success", "Template guardado.");
     } catch (error) {
-      showNotice("error", error.message);
+      announce("error", error.message);
     } finally {
-      setBusy("");
+      setSaving(false);
     }
   }
 
-  async function deleteTemplate() {
-    if (!templateForm.id) return;
-    if (!window.confirm("Apagar este template?")) return;
-
-    setBusy("templateDelete");
+  async function importHtml(files) {
+    if (!files?.length) return;
+    const data = new FormData();
+    [...files].forEach((file) => data.append("templates", file));
     try {
-      await api(`/api/templates/${templateForm.id}`, { method: "DELETE" });
-      const data = await api("/api/templates");
-      setTemplates(data.templates || []);
-      selectTemplate(data.templates?.[0] || null);
-      showNotice("success", "Template apagado");
+      await api(`/api/events/${event.id}/templates/import`, { method: "POST", body: data });
+      await onRefresh();
+      announce("success", `${files.length} ficheiro(s) HTML importado(s).`);
     } catch (error) {
-      showNotice("error", error.message);
-    } finally {
-      setBusy("");
+      announce("error", error.message);
     }
   }
 
-  async function previewTemplate() {
-    setBusy("templatePreview");
+  function insertVariable(variable) {
+    const field = activeField || "body_html";
+    const separator = form[field] ? " " : "";
+    update(field, `${form[field] || ""}${separator}${variable}`);
+  }
+
+  const variables = preview?.variables || [
+    "{{NOME}}", "{{EMAIL}}", "{{GRUPO}}", "{{ASSINATURA}}"
+  ];
+  const rendered = preview?.rendered;
+
+  return (
+    <div className="page-stack template-page">
+      <PageHeading
+        eyebrow="Estúdio visual"
+        title="Templates de email"
+        description="Edite o conteúdo e veja imediatamente como cada pessoa o receberá."
+        action={
+          <>
+            <label className="button button-secondary file-button">
+              <Upload size={17} aria-hidden="true" /> Importar HTML
+              <input className="sr-only" type="file" accept=".html,.htm,text/html" multiple onChange={(e) => importHtml(e.target.files)} />
+            </label>
+            <button className="button button-primary" type="button" disabled={saving} onClick={save}>
+              {saving ? <Loader2 className="spin" size={17} /> : <Save size={17} />}
+              {dirty ? "Guardar alterações" : "Guardado"}
+            </button>
+          </>
+        }
+      />
+
+      <div className="mobile-editor-tabs" role="tablist" aria-label="Área do template">
+        <button role="tab" aria-selected={mobileTab === "editor"} onClick={() => setMobileTab("editor")}>Editor</button>
+        <button role="tab" aria-selected={mobileTab === "preview"} onClick={() => setMobileTab("preview")}>Preview</button>
+      </div>
+
+      <div className="studio-grid">
+        <aside className={`panel template-library ${mobileTab === "preview" ? "mobile-hidden" : ""}`} aria-label="Biblioteca de templates">
+          <PanelTitle
+            title="Biblioteca"
+            subtitle={`${event.templates.length} modelos`}
+            action={<button className="icon-button" type="button" onClick={() => selectTemplate(null)} aria-label="Criar template"><Plus size={18} /></button>}
+          />
+          <div className="template-list">
+            {event.templates.map((template) => (
+              <button
+                type="button"
+                key={template.id}
+                onClick={() => selectTemplate(template)}
+                className={template.id === form.id ? "template-card template-card-active" : "template-card"}
+              >
+                <span className="template-card-icon"><Mail size={18} /></span>
+                <span><strong>{template.name}</strong><small>{template.subject}</small></span>
+                {template.id === form.id && <CheckCircle2 size={17} aria-label="Selecionado" />}
+              </button>
+            ))}
+            {!event.templates.length && (
+              <FriendlyEmpty icon={FileText} title="Sem templates" text="Crie um modelo ou importe os ficheiros HTML do evento." compact />
+            )}
+          </div>
+        </aside>
+
+        <section className={`panel editor-panel ${mobileTab === "preview" ? "mobile-hidden" : ""}`} aria-label="Editor do template">
+          <div className="editor-status">
+            <span className={dirty ? "status-dot status-dot-warning" : "status-dot"} />
+            {dirty ? "Alterações por guardar" : "Todas as alterações guardadas"}
+          </div>
+          <div className="form-stack">
+            <Field label="Nome do template" htmlFor="template-name">
+              <input id="template-name" value={form.name} onChange={(e) => update("name", e.target.value)} />
+            </Field>
+            <Field label="Assunto" htmlFor="template-subject">
+              <input id="template-subject" value={form.subject} onFocus={() => setActiveField("subject")} onChange={(e) => update("subject", e.target.value)} />
+            </Field>
+            <div className="variable-section">
+              <div><strong>Campos personalizados</strong><span>Selecione para inserir no campo ativo.</span></div>
+              <div className="variable-chips">
+                {variables.map((variable) => <button key={variable} type="button" onClick={() => insertVariable(variable)}>{variable}</button>)}
+              </div>
+            </div>
+            <Field label="Versão em texto simples" htmlFor="template-text" hint="Usada quando o destinatário não permite HTML.">
+              <textarea id="template-text" rows="8" value={form.body_text} onFocus={() => setActiveField("body_text")} onChange={(e) => update("body_text", e.target.value)} />
+            </Field>
+            <Field label="Código HTML" htmlFor="template-html" hint="O documento completo será preservado no envio.">
+              <textarea className="code-input" id="template-html" rows="15" value={form.body_html} onFocus={() => setActiveField("body_html")} onChange={(e) => update("body_html", e.target.value)} />
+            </Field>
+          </div>
+        </section>
+
+        <aside className={`preview-column ${mobileTab === "editor" ? "preview-mobile-hidden" : ""}`} aria-label="Preview do email">
+          <div className="preview-toolbar">
+            <div className="device-switcher" role="group" aria-label="Tamanho do preview">
+              <button className={device === "desktop" ? "active" : ""} type="button" onClick={() => setDevice("desktop")} aria-pressed={device === "desktop"}><Monitor size={17} /> Desktop</button>
+              <button className={device === "mobile" ? "active" : ""} type="button" onClick={() => setDevice("mobile")} aria-pressed={device === "mobile"}><Smartphone size={17} /> Mobile</button>
+            </div>
+            {previewBusy && <span className="preview-loading"><Loader2 className="spin" size={15} /> A atualizar</span>}
+          </div>
+          <div className="recipient-picker">
+            <label htmlFor="preview-person">Ver como será recebido por</label>
+            <select id="preview-person" value={selectedContactId} onChange={(e) => setSelectedContactId(e.target.value)}>
+              {event.contacts.map((contact) => <option key={contact.event_contact_id} value={contact.event_contact_id}>{contact.name}</option>)}
+              {!event.contacts.length && <option value="">Destinatário de exemplo</option>}
+            </select>
+          </div>
+          {rendered?.missingVariables?.length > 0 && (
+            <div className="inline-warning" role="status">
+              <AlertCircle size={17} aria-hidden="true" />
+              <span><strong>Campos em falta:</strong> {rendered.missingVariables.join(", ")}</span>
+            </div>
+          )}
+          <div className="mail-client">
+            <div className="mail-client-header">
+              <span className="mail-avatar" aria-hidden="true">LI</span>
+              <div>
+                <strong>{smtpLabel(event)}</strong>
+                <span>para {event.contacts.find((item) => item.event_contact_id === Number(selectedContactId))?.email || "destinatario@exemplo.org"}</span>
+              </div>
+            </div>
+            <div className="mail-subject">{rendered?.subject || form.subject || "O assunto aparecerá aqui"}</div>
+            <div className={`preview-stage preview-${device}`}>
+              <iframe
+                title={`Email renderizado em modo ${device === "desktop" ? "desktop" : "mobile"}`}
+                sandbox=""
+                srcDoc={htmlForPreview(rendered)}
+              />
+            </div>
+          </div>
+          <details className="text-alternative">
+            <summary><Eye size={16} /> Ler alternativa em texto simples</summary>
+            <pre>{rendered?.text || form.body_text || "Sem conteúdo."}</pre>
+          </details>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function Campaigns({ event, smtpSettings, onRefresh, onOpenSettings, announce }) {
+  const [form, setForm] = useState({
+    ...emptyCampaign,
+    signature: event.default_variables?.ASSINATURA || ""
+  });
+  const [busy, setBusy] = useState(false);
+  const [selectedCampaign, setSelectedCampaign] = useState(event.campaigns[0] || null);
+  const sendableContacts = event.contacts.filter((contact) => contact.selected_for_email);
+  const campaignContacts = form.selectedGroups.length
+    ? sendableContacts.filter((contact) => form.selectedGroups.includes(contact.group_name || "Sem grupo"))
+    : sendableContacts;
+  const missingAssignments = campaignContacts.filter((contact) => !contact.template_id).length;
+  const availableGroups = event.groups.map((group) => group.name);
+  const selectedCount = campaignContacts.length;
+
+  const ready =
+    selectedCount > 0 &&
+    event.templates.length > 0 &&
+    Boolean(smtpSettings) &&
+    Boolean(form.signature) &&
+    (form.templateMode === "single" ? Boolean(form.templateId) : missingAssignments === 0);
+
+  const toggleGroup = (group) => {
+    setForm((current) => ({
+      ...current,
+      selectedGroups: current.selectedGroups.includes(group)
+        ? current.selectedGroups.filter((item) => item !== group)
+        : [...current.selectedGroups, group]
+    }));
+  };
+
+  async function createCampaign() {
+    setBusy(true);
     try {
-      const sampleContact = contacts[0] || fallbackContact;
-      const data = await api("/api/templates/preview", {
+      const scheduledAt =
+        form.sendMode === "scheduled" && form.scheduledAt
+          ? new Date(form.scheduledAt).toISOString()
+          : null;
+      const data = await api("/api/campaigns", {
         method: "POST",
-        body: JSON.stringify({ ...templateForm, contact: sampleContact })
+        body: JSON.stringify({
+          eventId: event.id,
+          name: form.name,
+          templateMode: form.templateMode,
+          templateId: Number(form.templateId) || null,
+          contactIds: campaignContacts.map((contact) => contact.id),
+          groups: form.selectedGroups,
+          globals: { ASSINATURA: form.signature },
+          scheduledAt,
+          intervalSeconds: Number(form.intervalSeconds),
+          maxPerMinute: Number(form.maxPerMinute),
+          confirm: form.confirm
+        })
       });
-      setRenderedPreview(data.rendered);
+      setSelectedCampaign(data.campaign);
+      setForm({ ...emptyCampaign, signature: form.signature });
+      await onRefresh();
+      announce("success", scheduledAt ? "Campanha agendada." : "Campanha colocada na fila de envio.");
     } catch (error) {
-      showNotice("error", error.message);
+      announce("error", error.message, error.details);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openCampaign(id) {
+    try {
+      const data = await api(`/api/campaigns/${id}`);
+      setSelectedCampaign(data.campaign);
+    } catch (error) {
+      announce("error", error.message);
+    }
+  }
+
+  return (
+    <div className="page-stack">
+      <PageHeading
+        eyebrow="Campanhas"
+        title="Rever e enviar"
+        description="O Mail Studio valida cada pessoa e cada variável antes do envio."
+      />
+      <div className="campaign-layout">
+        <section className="panel campaign-builder">
+          <PanelTitle title="Nova campanha" subtitle={`${selectedCount} destinatários selecionados`} />
+          <div className="form-stack">
+            <Field label="Nome da campanha" htmlFor="campaign-name">
+              <input id="campaign-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder={`Comunicação — ${event.name}`} />
+            </Field>
+            <fieldset className="choice-fieldset">
+              <legend>Como escolher o modelo</legend>
+              <label className={form.templateMode === "assigned" ? "choice-card choice-card-active" : "choice-card"}>
+                <input type="radio" name="template-mode" checked={form.templateMode === "assigned"} onChange={() => setForm({ ...form, templateMode: "assigned" })} />
+                <span><strong>Modelo atribuído a cada pessoa</strong><small>Ideal para uma mala direta com vários grupos.</small></span>
+              </label>
+              <label className={form.templateMode === "single" ? "choice-card choice-card-active" : "choice-card"}>
+                <input type="radio" name="template-mode" checked={form.templateMode === "single"} onChange={() => setForm({ ...form, templateMode: "single" })} />
+                <span><strong>Um único modelo</strong><small>Todos recebem o mesmo template personalizado.</small></span>
+              </label>
+            </fieldset>
+            {form.templateMode === "single" && (
+              <Field label="Template" htmlFor="campaign-template">
+                <select id="campaign-template" value={form.templateId} onChange={(e) => setForm({ ...form, templateId: e.target.value })}>
+                  <option value="">Escolha um modelo</option>
+                  {event.templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+                </select>
+              </Field>
+            )}
+            <fieldset className="group-fieldset">
+              <legend>Segmentos</legend>
+              <p>Sem seleção, todo o público será incluído.</p>
+              <div className="group-checks">
+                {availableGroups.map((group) => (
+                  <label key={group}>
+                    <input type="checkbox" checked={form.selectedGroups.includes(group)} onChange={() => toggleGroup(group)} />
+                    <span>{group}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+            <Field label="Assinatura" htmlFor="campaign-signature" hint="Preenche {{ASSINATURA}} em todos os templates.">
+              <input id="campaign-signature" value={form.signature} onChange={(e) => setForm({ ...form, signature: e.target.value })} />
+            </Field>
+            <fieldset className="inline-fieldset">
+              <legend>Quando enviar</legend>
+              <label><input type="radio" name="send-mode" checked={form.sendMode === "now"} onChange={() => setForm({ ...form, sendMode: "now" })} /> Enviar agora</label>
+              <label><input type="radio" name="send-mode" checked={form.sendMode === "scheduled"} onChange={() => setForm({ ...form, sendMode: "scheduled" })} /> Agendar</label>
+            </fieldset>
+            {form.sendMode === "scheduled" && (
+              <Field label="Data e hora" htmlFor="scheduled-at">
+                <input id="scheduled-at" type="datetime-local" value={form.scheduledAt} onChange={(e) => setForm({ ...form, scheduledAt: e.target.value })} />
+              </Field>
+            )}
+            <div className="two-fields">
+              <Field label="Segundos entre emails" htmlFor="interval-seconds">
+                <input id="interval-seconds" type="number" min="1" max="3600" value={form.intervalSeconds} onChange={(e) => setForm({ ...form, intervalSeconds: e.target.value })} />
+              </Field>
+              <Field label="Máximo por minuto" htmlFor="max-per-minute">
+                <input id="max-per-minute" type="number" min="1" max={smtpSettings?.max_per_minute || 60} value={form.maxPerMinute} onChange={(e) => setForm({ ...form, maxPerMinute: e.target.value })} />
+              </Field>
+            </div>
+          </div>
+        </section>
+
+        <aside className="campaign-review">
+          <section className="panel">
+            <PanelTitle title="Revisão final" subtitle="Nada será enviado sem confirmação" />
+            <ul className="review-list">
+              <ReviewItem ready={selectedCount > 0} label={`${selectedCount} destinatários selecionados`} />
+              <ReviewItem ready={event.templates.length > 0} label={`${event.templates.length} templates disponíveis`} />
+              <ReviewItem ready={Boolean(smtpSettings)} label={smtpSettings ? `Servidor ${smtpSettings.from_email}` : "Servidor por configurar"} action={!smtpSettings ? onOpenSettings : null} />
+              <ReviewItem ready={form.templateMode === "single" ? Boolean(form.templateId) : missingAssignments === 0} label={missingAssignments && form.templateMode === "assigned" ? `${missingAssignments} pessoas sem modelo` : "Modelos associados"} />
+              <ReviewItem ready={Boolean(form.signature)} label={form.signature ? "Assinatura preenchida" : "Assinatura em falta"} />
+            </ul>
+            <label className="confirmation-box">
+              <input type="checkbox" checked={form.confirm} onChange={(e) => setForm({ ...form, confirm: e.target.checked })} />
+              <span>Revisei o público, os modelos e autorizo este envio.</span>
+            </label>
+            <button className="button button-primary button-wide" type="button" disabled={!ready || !form.confirm || busy} onClick={createCampaign}>
+              {busy ? <Loader2 className="spin" size={18} /> : form.sendMode === "scheduled" ? <Clock3 size={18} /> : <Send size={18} />}
+              {form.sendMode === "scheduled" ? "Agendar campanha" : "Confirmar e enviar"}
+            </button>
+          </section>
+        </aside>
+      </div>
+
+      <div className="content-grid content-grid-two">
+        <section className="panel">
+          <PanelTitle title="Histórico" subtitle="Campanhas deste evento" />
+          <div className="campaign-history">
+            {event.campaigns.length ? event.campaigns.map((campaign) => (
+              <button key={campaign.id} type="button" onClick={() => openCampaign(campaign.id)} className={selectedCampaign?.id === campaign.id ? "campaign-row campaign-row-active" : "campaign-row"}>
+                <span className="campaign-icon"><Send size={17} /></span>
+                <span><strong>{campaign.name}</strong><small>{campaign.template_name} · {formatDate(campaign.created_at)}</small></span>
+                <span className="campaign-count">{campaign.sent}/{campaign.total}</span>
+                <StatusPill status={campaign.status} />
+              </button>
+            )) : <FriendlyEmpty icon={Inbox} title="Ainda não há campanhas" text="A primeira campanha aparecerá aqui depois de confirmada." compact />}
+          </div>
+        </section>
+        <CampaignDetail campaign={selectedCampaign} />
+      </div>
+    </div>
+  );
+}
+
+function CampaignDetail({ campaign }) {
+  if (!campaign) return <section className="panel"><FriendlyEmpty icon={Eye} title="Selecione uma campanha" text="Veja os resultados e eventuais falhas." /></section>;
+  const total = Number(campaign.total || 0);
+  const percentage = total ? Math.round((Number(campaign.sent || 0) / total) * 100) : 0;
+  return (
+    <section className="panel">
+      <PanelTitle title={campaign.name} subtitle={statusLabel(campaign.status)} />
+      <div className="campaign-summary">
+        <div className="delivery-ring" style={{ "--progress": `${percentage * 3.6}deg` }}><span>{percentage}%</span></div>
+        <div>
+          <strong>{campaign.sent} entregues</strong>
+          <span>{campaign.failed} falhas · {campaign.queued} em fila</span>
+        </div>
+      </div>
+      {campaign.jobs?.length > 0 && (
+        <details className="job-details">
+          <summary>Ver destinatários</summary>
+          <ul>
+            {campaign.jobs.slice(0, 40).map((job) => <li key={job.id}><span>{job.recipient_name}</span><StatusPill status={job.status} /></li>)}
+          </ul>
+        </details>
+      )}
+    </section>
+  );
+}
+
+function SettingsView({ event, smtpSettings, onSmtpSaved, onEventSaved, onArchived, announce }) {
+  const [eventForm, setEventForm] = useState({
+    name: event.name,
+    description: event.description || "",
+    event_date: event.event_date || "",
+    signature: event.default_variables?.ASSINATURA || ""
+  });
+  const [smtpForm, setSmtpForm] = useState({
+    host: smtpSettings?.host || "",
+    port: smtpSettings?.port || 465,
+    from_email: smtpSettings?.from_email || "",
+    password: "",
+    secure: smtpSettings?.secure ?? true,
+    max_per_minute: smtpSettings?.max_per_minute || 30
+  });
+  const [busy, setBusy] = useState("");
+
+  async function saveEvent() {
+    setBusy("event");
+    try {
+      const data = await api(`/api/events/${event.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          name: eventForm.name,
+          description: eventForm.description,
+          event_date: eventForm.event_date || null,
+          default_variables: {
+            ...(event.default_variables || {}),
+            ASSINATURA: eventForm.signature
+          }
+        })
+      });
+      onEventSaved(data.event);
+      announce("success", "Dados do evento guardados.");
+    } catch (error) {
+      announce("error", error.message);
     } finally {
       setBusy("");
     }
@@ -327,1182 +1341,418 @@ export default function App() {
         method: "POST",
         body: JSON.stringify(smtpForm)
       });
-      setSmtpSettings(data.settings);
+      onSmtpSaved(data.settings);
       setSmtpForm((current) => ({ ...current, password: "" }));
-      showNotice("success", "SMTP guardado");
+      announce("success", "Servidor de envio guardado.");
     } catch (error) {
-      showNotice("error", error.message);
+      announce("error", error.message);
     } finally {
       setBusy("");
     }
   }
 
   async function testSmtp() {
-    setBusy("smtpTest");
+    setBusy("test");
     try {
       const data = await api("/api/smtp-settings/test", {
         method: "POST",
         body: JSON.stringify(smtpForm)
       });
-      showNotice("success", data.message || "Ligação validada");
+      announce("success", data.message || "Ligação validada.");
     } catch (error) {
-      showNotice("error", error.message);
+      announce("error", error.message);
     } finally {
       setBusy("");
     }
   }
 
-  async function sendCampaign() {
-    if (campaignForm.sendMode === "scheduled" && !campaignForm.scheduledAt) {
-      showNotice("error", "Escolha a data/hora de agendamento");
-      return;
-    }
-
-    if (selectedContacts.length === 0) {
-      showNotice("error", "Selecione pelo menos um contacto");
-      return;
-    }
-
-    setBusy("campaign");
+  async function archiveEvent() {
+    if (!window.confirm(`Arquivar “${event.name}”? Os dados e o histórico serão preservados.`)) return;
     try {
-      const scheduledAt =
-        campaignForm.sendMode === "scheduled"
-          ? new Date(campaignForm.scheduledAt).toISOString()
-          : null;
+      await api(`/api/events/${event.id}/archive`, { method: "POST", body: "{}" });
+      announce("success", "Evento arquivado. Pode continuar a consultar os dados.");
+      onArchived();
+    } catch (error) {
+      announce("error", error.message);
+    }
+  }
 
-      const data = await api("/api/campaigns", {
+  return (
+    <div className="page-stack">
+      <PageHeading eyebrow="Definições" title="Evento e servidor de envio" description="Ajuste os dados usados nos templates e a ligação de email." />
+      <div className="settings-grid">
+        <section className="panel settings-card">
+          <PanelTitle title="Dados do evento" subtitle="Visíveis apenas neste espaço de trabalho" />
+          <div className="form-stack">
+            <Field label="Nome" htmlFor="settings-event-name"><input id="settings-event-name" value={eventForm.name} onChange={(e) => setEventForm({ ...eventForm, name: e.target.value })} /></Field>
+            <Field label="Descrição" htmlFor="settings-event-description"><textarea id="settings-event-description" rows="4" value={eventForm.description} onChange={(e) => setEventForm({ ...eventForm, description: e.target.value })} /></Field>
+            <Field label="Data" htmlFor="settings-event-date"><input id="settings-event-date" type="date" value={eventForm.event_date} onChange={(e) => setEventForm({ ...eventForm, event_date: e.target.value })} /></Field>
+            <Field label="Assinatura padrão" htmlFor="settings-signature" hint="Preenche {{ASSINATURA}} automaticamente."><input id="settings-signature" value={eventForm.signature} onChange={(e) => setEventForm({ ...eventForm, signature: e.target.value })} /></Field>
+            <button className="button button-primary" type="button" onClick={saveEvent} disabled={busy === "event"}>{busy === "event" ? <Loader2 className="spin" size={17} /> : <Save size={17} />} Guardar evento</button>
+          </div>
+        </section>
+
+        <section className="panel settings-card">
+          <PanelTitle title="Servidor de envio" subtitle="Credenciais cifradas na base local" action={smtpSettings ? <span className="secure-badge"><ShieldCheck size={16} /> Guardado</span> : null} />
+          <div className="form-stack">
+            <Field label="Servidor SMTP" htmlFor="smtp-host"><input id="smtp-host" value={smtpForm.host} onChange={(e) => setSmtpForm({ ...smtpForm, host: e.target.value })} placeholder="smtp.exemplo.org" /></Field>
+            <div className="two-fields">
+              <Field label="Porta" htmlFor="smtp-port"><input id="smtp-port" type="number" min="1" value={smtpForm.port} onChange={(e) => setSmtpForm({ ...smtpForm, port: e.target.value })} /></Field>
+              <Field label="Máximo/minuto" htmlFor="smtp-limit"><input id="smtp-limit" type="number" min="1" max="60" value={smtpForm.max_per_minute} onChange={(e) => setSmtpForm({ ...smtpForm, max_per_minute: e.target.value })} /></Field>
+            </div>
+            <Field label="Email remetente" htmlFor="smtp-email"><input id="smtp-email" type="email" value={smtpForm.from_email} onChange={(e) => setSmtpForm({ ...smtpForm, from_email: e.target.value })} /></Field>
+            <Field label="Password ou App Password" htmlFor="smtp-password" hint={smtpSettings?.hasPassword ? "Deixe vazio para manter a password guardada." : ""}><input id="smtp-password" type="password" value={smtpForm.password} onChange={(e) => setSmtpForm({ ...smtpForm, password: e.target.value })} placeholder={smtpSettings?.hasPassword ? "Password guardada" : ""} /></Field>
+            <label className="checkbox-row"><input type="checkbox" checked={smtpForm.secure} onChange={(e) => setSmtpForm({ ...smtpForm, secure: e.target.checked })} /> Usar ligação segura SSL/TLS</label>
+            <div className="button-row">
+              <button className="button button-primary" type="button" onClick={saveSmtp} disabled={busy === "smtp"}>{busy === "smtp" ? <Loader2 className="spin" size={17} /> : <Save size={17} />} Guardar</button>
+              <button className="button button-secondary" type="button" onClick={testSmtp} disabled={busy === "test"}>{busy === "test" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />} Testar ligação</button>
+            </div>
+          </div>
+        </section>
+      </div>
+      <section className="panel danger-zone">
+        <div><Archive size={20} /><span><strong>Arquivar este evento</strong><small>Oculta-o da lista principal, preservando público, templates e histórico.</small></span></div>
+        <button className="button button-danger" type="button" onClick={archiveEvent}>Arquivar evento</button>
+      </section>
+    </div>
+  );
+}
+
+function CreateEventModal({ open, onClose, onCreated }) {
+  const [form, setForm] = useState({ name: "", description: "", event_date: "", signature: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(eventSubmit) {
+    eventSubmit.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const data = await api("/api/events", {
         method: "POST",
         body: JSON.stringify({
-          name: campaignForm.name,
-          templateId: Number(selectedTemplateId),
-          contactIds: selectedContactIds,
-          scheduledAt,
-          intervalSeconds: Number(campaignForm.intervalSeconds),
-          maxPerMinute: Number(campaignForm.maxPerMinute),
-          confirm: campaignForm.confirm
+          name: form.name,
+          description: form.description,
+          event_date: form.event_date || null,
+          default_variables: { ASSINATURA: form.signature }
         })
       });
-
-      setSelectedCampaign(data.campaign);
-      await loadCampaigns();
-      setCampaignForm(emptyCampaign);
-      showNotice("success", "Campanha criada");
-    } catch (error) {
-      showNotice("error", error.message);
+      setForm({ name: "", description: "", event_date: "", signature: "" });
+      onCreated(data.event);
+    } catch (eventError) {
+      setError(eventError.message);
     } finally {
-      setBusy("");
+      setBusy(false);
     }
   }
+  return (
+    <Modal open={open} onClose={onClose} title="Criar um novo evento" description="Comece pelo contexto; o público e os modelos entram a seguir.">
+      {error && <ErrorSummary message={error} />}
+      <form className="form-stack" onSubmit={submit}>
+        <Field label="Nome do evento" htmlFor="new-event-name"><input autoFocus id="new-event-name" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ex.: Escrita Académica com IA — 2026" /></Field>
+        <Field label="Descrição" htmlFor="new-event-description" hint="Uma frase para ajudar a equipa a reconhecer este evento."><textarea id="new-event-description" rows="3" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
+        <div className="two-fields">
+          <Field label="Data" htmlFor="new-event-date"><input id="new-event-date" type="date" value={form.event_date} onChange={(e) => setForm({ ...form, event_date: e.target.value })} /></Field>
+          <Field label="Assinatura padrão" htmlFor="new-event-signature"><input id="new-event-signature" value={form.signature} onChange={(e) => setForm({ ...form, signature: e.target.value })} /></Field>
+        </div>
+        <div className="modal-actions">
+          <button className="button button-secondary" type="button" onClick={onClose}>Cancelar</button>
+          <button className="button button-primary" type="submit" disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : <Plus size={17} />} Criar evento</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
 
-  async function openCampaign(id) {
-    setBusy(`campaign-${id}`);
+function ImportModal({ open, event, onClose, onImported }) {
+  const [step, setStep] = useState(1);
+  const [csv, setCsv] = useState(null);
+  const [htmlFiles, setHtmlFiles] = useState([]);
+  const [preview, setPreview] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) {
+      setStep(1);
+      setCsv(null);
+      setHtmlFiles([]);
+      setPreview(null);
+      setError("");
+    }
+  }, [open]);
+
+  async function analyse() {
+    if (!csv) {
+      setError("Escolha o ficheiro CSV do público.");
+      return;
+    }
+    setBusy(true);
+    setError("");
     try {
-      const data = await api(`/api/campaigns/${id}`);
-      setSelectedCampaign(data.campaign);
-    } catch (error) {
-      showNotice("error", error.message);
+      const data = new FormData();
+      data.append("file", csv);
+      htmlFiles.forEach((file) => data.append("templates", file));
+      const result = await api(`/api/events/${event.id}/import/preview`, { method: "POST", body: data });
+      setPreview(result);
+      setStep(3);
+    } catch (eventError) {
+      setError(eventError.message);
     } finally {
-      setBusy("");
+      setBusy(false);
     }
   }
 
-  function toggleContact(id) {
-    setSelectedContactIds((current) =>
-      current.includes(id)
-        ? current.filter((currentId) => currentId !== id)
-        : [...current, id]
-    );
+  async function confirmImport() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api(`/api/events/${event.id}/import`, {
+        method: "POST",
+        body: JSON.stringify({ contacts: preview.contacts, templates: preview.templates })
+      });
+      onImported(result);
+    } catch (eventError) {
+      setError(eventError.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
-  const readiness = [
-    { label: "Contactos", value: contacts.length, ok: contacts.length > 0 },
-    { label: "Templates", value: templates.length, ok: templates.length > 0 },
-    { label: "SMTP", value: smtpSettings ? "OK" : "-", ok: Boolean(smtpSettings) }
-  ];
-
+  const labels = ["Evento", "Ficheiros", "Campos", "Qualidade", "Modelos", "Confirmar"];
   return (
-    <div className="min-h-screen bg-mist text-ink">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-md bg-pine text-white">
-              <Mail size={20} aria-hidden="true" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold tracking-normal">Smart Outreach Mailer</h1>
-              <p className="text-sm text-slate-500">Envio SMTP personalizado</p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-3 gap-2 sm:flex">
-            {readiness.map((item) => (
-              <div key={item.label} className="metric min-w-24">
-                <div className="text-xs text-slate-500">{item.label}</div>
-                <div className="flex items-center gap-2 text-sm font-bold">
-                  <span>{item.value}</span>
-                  {item.ok ? (
-                    <CheckCircle2 className="text-pine" size={16} aria-hidden="true" />
-                  ) : (
-                    <AlertCircle className="text-amberline" size={16} aria-hidden="true" />
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
-        <WizardNav step={step} setStep={setStep} />
-
-        {notice && (
-          <div
-            className={`mb-4 flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
-              notice.type === "error"
-                ? "border-red-200 bg-red-50 text-red-800"
-                : "border-emerald-200 bg-emerald-50 text-emerald-800"
-            }`}
-          >
-            {notice.type === "error" ? <XCircle size={16} /> : <CheckCircle2 size={16} />}
-            <span>{notice.message}</span>
+    <Modal open={open} onClose={onClose} title="Importar público e modelos" description={`Evento: ${event?.name || ""}`} wide>
+      <ol className="import-steps" aria-label={`Passo ${step} de 6`}>
+        {labels.map((label, index) => (
+          <li key={label} className={index + 1 === step ? "active" : index + 1 < step ? "done" : ""}>
+            <span>{index + 1 < step ? <Check size={14} /> : index + 1}</span>
+            <small>{label}</small>
+          </li>
+        ))}
+      </ol>
+      {error && <ErrorSummary message={error} />}
+      <div className="import-content">
+        {step === 1 && (
+          <div className="import-intro">
+            <span className="large-icon"><CalendarDays size={30} /></span>
+            <h3>{event?.name}</h3>
+            <p>Os contactos serão associados a este evento. Pessoas já conhecidas não serão duplicadas.</p>
+            <button className="button button-primary" type="button" onClick={() => setStep(2)}>Continuar para os ficheiros</button>
           </div>
         )}
-
-        {busy === "load" ? (
-          <div className="panel flex min-h-80 items-center justify-center">
-            <Loader2 className="animate-spin text-pine" size={28} aria-hidden="true" />
-          </div>
-        ) : (
-          <>
-            {step === 0 && (
-              <ContactsStep
-                busy={busy}
-                contacts={contacts}
-                filteredContacts={filteredContacts}
-                preview={preview}
-                selectedContactIds={selectedContactIds}
-                onCsvPreview={handleCsvPreview}
-                onImport={importPreviewContacts}
-                onClear={clearContacts}
-                onToggleContact={toggleContact}
-                onSelectAll={() => setSelectedContactIds((current) => Array.from(new Set([...current, ...filteredContacts.map((c) => c.id)])))}
-                onSelectNone={() => setSelectedContactIds((current) => current.filter((id) => !filteredContacts.map((c) => c.id).includes(id)))}
-                contactsSearch={contactsSearch}
-                setContactsSearch={setContactsSearch}
-                contactsFilter={contactsFilter}
-                setContactsFilter={setContactsFilter}
-                onOpenAddModal={() => setIsAddModalOpen(true)}
-              />
-            )}
-
-            {step === 1 && (
-              <TemplateStep
-                busy={busy}
-                templates={templates}
-                templateForm={templateForm}
-                renderedPreview={renderedPreview}
-                onSelect={selectTemplate}
-                onChange={setTemplateForm}
-                onNew={() => selectTemplate(null)}
-                onSave={saveTemplate}
-                onDelete={deleteTemplate}
-                onPreview={previewTemplate}
-              />
-            )}
-
-            {step === 2 && (
-              <SmtpStep
-                busy={busy}
-                smtpForm={smtpForm}
-                smtpSettings={smtpSettings}
-                onChange={setSmtpForm}
-                onSave={saveSmtp}
-                onTest={testSmtp}
-              />
-            )}
-
-            {step === 3 && (
-              <SendStep
-                busy={busy}
-                contacts={contacts}
-                filteredContacts={filteredSendContacts}
-                templates={templates}
-                selectedContacts={selectedContacts}
-                selectedContactIds={selectedContactIds}
-                selectedTemplateId={selectedTemplateId}
-                smtpSettings={smtpSettings}
-                campaignForm={campaignForm}
-                campaigns={campaigns}
-                selectedCampaign={selectedCampaign || latestCampaign}
-                onTemplateSelect={(id) => {
-                  const template = templates.find((item) => item.id === Number(id));
-                  selectTemplate(template);
-                }}
-                onCampaignChange={setCampaignForm}
-                onSend={sendCampaign}
-                onToggleContact={toggleContact}
-                onSelectAll={() => setSelectedContactIds((current) => Array.from(new Set([...current, ...filteredSendContacts.map((c) => c.id)])))}
-                onSelectNone={() => setSelectedContactIds((current) => current.filter((id) => !filteredSendContacts.map((c) => c.id).includes(id)))}
-                onOpenCampaign={openCampaign}
-                onRefreshCampaigns={loadCampaigns}
-                sendSearch={sendSearch}
-                setSendSearch={setSendSearch}
-              />
-            )}
-          </>
-        )}
-      </main>
-
-      <AddContactModal
-        isOpen={isAddModalOpen}
-        onClose={() => setIsAddModalOpen(false)}
-        onSave={async (newContact) => {
-          await refreshContacts();
-          setSelectedContactIds((current) => [...current, newContact.id]);
-        }}
-        showNotice={showNotice}
-      />
-    </div>
-  );
-}
-
-function WizardNav({ step, setStep }) {
-  return (
-    <nav className="mb-4 grid gap-2 sm:grid-cols-4" aria-label="Wizard">
-      {steps.map((item, index) => {
-        const Icon = item.icon;
-        const isActive = index === step;
-        const isDone = index < step;
-
-        return (
-          <button
-            key={item.label}
-            className={`focus-ring flex h-14 items-center justify-between rounded-md border px-3 text-left transition ${
-              isActive
-                ? "border-pine bg-white text-pine shadow-sm"
-                : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
-            }`}
-            onClick={() => setStep(index)}
-            type="button"
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              <Icon size={18} aria-hidden="true" />
-              <span className="truncate text-sm font-semibold">{item.label}</span>
-            </span>
-            {isDone ? (
-              <CheckCircle2 size={18} className="text-pine" aria-hidden="true" />
-            ) : (
-              <ChevronRight size={18} aria-hidden="true" />
-            )}
-          </button>
-        );
-      })}
-    </nav>
-  );
-}
-
-function ContactsStep({
-  busy,
-  contacts,
-  filteredContacts,
-  preview,
-  selectedContactIds,
-  onCsvPreview,
-  onImport,
-  onClear,
-  onToggleContact,
-  onSelectAll,
-  onSelectNone,
-  contactsSearch,
-  setContactsSearch,
-  contactsFilter,
-  setContactsFilter,
-  onOpenAddModal
-}) {
-  return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
-      <section className="panel overflow-hidden">
-        <PanelHeader
-          title="Contactos"
-          action={
-            <div className="flex flex-wrap gap-2">
-              <button className="primary-button" onClick={onOpenAddModal} type="button">
-                <Plus size={16} aria-hidden="true" />
-                Adicionar
-              </button>
-              <label className="secondary-button cursor-pointer">
-                <Upload size={16} aria-hidden="true" />
-                CSV
-                <input
-                  className="sr-only"
-                  type="file"
-                  accept=".csv,text/csv"
-                  onChange={(event) => onCsvPreview(event.target.files?.[0])}
-                />
-              </label>
-              <button className="danger-button" onClick={onClear} disabled={contacts.length === 0} type="button">
-                <Trash2 size={16} aria-hidden="true" />
-                Apagar
-              </button>
-            </div>
-          }
-        />
-
-        <div className="flex flex-col gap-3 border-b border-slate-200 bg-slate-50/50 p-4 sm:flex-row sm:items-center">
-          <div className="relative flex-1">
-            <input
-              type="text"
-              className="field pl-9"
-              placeholder="Pesquisar por nome, email ou empresa..."
-              value={contactsSearch}
-              onChange={(e) => setContactsSearch(e.target.value)}
+        {step === 2 && (
+          <div className="upload-grid">
+            <FileDrop
+              id="csv-upload"
+              icon={FileText}
+              title="Lista de público"
+              description="CSV com NOME e EMAIL. Os restantes campos serão preservados."
+              accept=".csv,text/csv"
+              fileNames={csv ? [csv.name] : []}
+              onFiles={(files) => setCsv(files[0] || null)}
             />
-            <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-slate-400">
-              <Search size={16} />
+            <FileDrop
+              id="html-upload"
+              icon={Code2}
+              title="Templates HTML"
+              description="Pode selecionar vários ficheiros. MODELO_EMAIL fará a associação."
+              accept=".html,.htm,text/html"
+              multiple
+              fileNames={htmlFiles.map((file) => file.name)}
+              onFiles={(files) => setHtmlFiles([...files])}
+            />
+            <div className="modal-actions modal-actions-full">
+              <button className="button button-secondary" type="button" onClick={() => setStep(1)}>Voltar</button>
+              <button className="button button-primary" type="button" onClick={analyse} disabled={busy || !csv}>{busy ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />} Analisar ficheiros</button>
             </div>
           </div>
-          <div className="flex flex-wrap gap-1">
-            <button
-              type="button"
-              className={`secondary-button !py-1.5 !px-3 text-xs !h-auto ${contactsFilter === "all" ? "border-pine text-pine bg-teal-50/50 font-bold" : ""}`}
-              onClick={() => setContactsFilter("all")}
-            >
-              Todos ({contacts.length})
-            </button>
-            <button
-              type="button"
-              className={`secondary-button !py-1.5 !px-3 text-xs !h-auto ${contactsFilter === "selected" ? "border-pine text-pine bg-teal-50/50 font-bold" : ""}`}
-              onClick={() => setContactsFilter("selected")}
-            >
-              Selecionados ({selectedContactIds.length})
-            </button>
-            <button
-              type="button"
-              className={`secondary-button !py-1.5 !px-3 text-xs !h-auto ${contactsFilter === "unselected" ? "border-pine text-pine bg-teal-50/50 font-bold" : ""}`}
-              onClick={() => setContactsFilter("unselected")}
-            >
-              Não Selecionados ({contacts.length - selectedContactIds.length})
-            </button>
-          </div>
-        </div>
-
-        {preview ? (
-          <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
-            <div className="grid gap-2 sm:grid-cols-3">
-              <Metric label="Linhas" value={preview.summary.totalRows} />
-              <Metric label="Válidos" value={preview.summary.valid} tone="good" />
-              <Metric label="Inválidos" value={preview.summary.invalid} tone="warn" />
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                className="primary-button"
-                disabled={!preview.validContacts.length || busy === "import"}
-                onClick={onImport}
-                type="button"
-              >
-                {busy === "import" ? <Loader2 className="animate-spin" size={16} /> : <CheckCircle2 size={16} />}
-                Importar válidos
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        <div className="max-h-[520px] overflow-auto">
-          {contacts.length === 0 ? (
-            <EmptyState icon={ContactRound} title="Sem contactos" />
-          ) : filteredContacts.length === 0 ? (
-            <EmptyState icon={Search} title="Nenhum contacto correspondente" />
-          ) : (
-            <table className="w-full min-w-[640px] border-collapse text-sm">
-              <thead>
-                <tr className="table-heading">
-                  <th className="w-12 px-4 py-3">
-                    <span className="sr-only">Selecionar</span>
-                  </th>
-                  <th className="px-4 py-3">Nome</th>
-                  <th className="px-4 py-3">Email</th>
-                  <th className="px-4 py-3">Empresa</th>
-                  <th className="px-4 py-3">Criado</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredContacts.map((contact) => (
-                  <tr key={contact.id} className="border-t border-slate-100">
-                    <td className="px-4 py-3">
-                      <input
-                        className="h-4 w-4 rounded border-slate-300 text-pine focus:ring-pine"
-                        checked={selectedContactIds.includes(contact.id)}
-                        onChange={() => onToggleContact(contact.id)}
-                        type="checkbox"
-                      />
-                    </td>
-                    <td className="px-4 py-3 font-medium">{contact.name}</td>
-                    <td className="px-4 py-3 text-slate-600">{contact.email}</td>
-                    <td className="px-4 py-3 text-slate-600">{contact.company || "-"}</td>
-                    <td className="px-4 py-3 text-slate-500">{formatDate(contact.created_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </section>
-
-      <aside className="panel h-fit overflow-hidden">
-        <PanelHeader title="Preview CSV" />
-        {busy === "preview" ? (
-          <LoadingBlock label="A analisar CSV" />
-        ) : preview ? (
-          <div className="divide-y divide-slate-100">
-            <PreviewRows title="Válidos" rows={preview.validContacts.slice(0, 6)} type="valid" />
-            <PreviewRows title="Inválidos" rows={preview.invalidRows.slice(0, 8)} type="invalid" />
-          </div>
-        ) : (
-          <EmptyState icon={Upload} title="CSV por analisar" />
         )}
-        <div className="flex gap-2 border-t border-slate-200 p-4">
-          <button className="secondary-button flex-1" onClick={onSelectAll} disabled={contacts.length === 0} type="button">
-            Todos
-          </button>
-          <button className="secondary-button flex-1" onClick={onSelectNone} disabled={contacts.length === 0} type="button">
-            Nenhum
-          </button>
-        </div>
-      </aside>
-    </div>
-  );
-}
-
-function TemplateStep({
-  busy,
-  templates,
-  templateForm,
-  renderedPreview,
-  onSelect,
-  onChange,
-  onNew,
-  onSave,
-  onDelete,
-  onPreview
-}) {
-  return (
-    <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
-      <aside className="panel h-fit overflow-hidden">
-        <PanelHeader
-          title="Modelos"
-          action={
-            <button className="secondary-button" onClick={onNew} type="button" title="Novo template">
-              <Plus size={16} aria-hidden="true" />
-              Novo
-            </button>
-          }
-        />
-        <div className="max-h-[520px] overflow-auto">
-          {templates.length === 0 ? (
-            <EmptyState icon={FileText} title="Sem modelos" />
-          ) : (
-            <div className="divide-y divide-slate-100">
-              {templates.map((template) => (
-                <button
-                  key={template.id}
-                  className={`focus-ring block w-full px-4 py-3 text-left transition ${
-                    template.id === templateForm.id ? "bg-teal-50" : "hover:bg-slate-50"
-                  }`}
-                  onClick={() => onSelect(template)}
-                  type="button"
-                >
-                  <div className="font-semibold">{template.name}</div>
-                  <div className="truncate text-sm text-slate-500">{template.subject}</div>
-                </button>
-              ))}
+        {step === 3 && preview && (
+          <div className="import-review">
+            <h3>Campos reconhecidos</h3>
+            <p>Nome e email identificam a pessoa; os restantes campos ficam disponíveis nos templates.</p>
+            <div className="column-chips">{preview.columns.map((column) => <span key={column}>{column}</span>)}</div>
+            <div className="mapping-cards">
+              <div><strong>NOME</strong><span>Nome da pessoa</span><CheckCircle2 size={18} /></div>
+              <div><strong>EMAIL</strong><span>Endereço de envio</span><CheckCircle2 size={18} /></div>
+              <div><strong>GRUPO</strong><span>Segmentação</span><CheckCircle2 size={18} /></div>
+              <div><strong>MODELO_EMAIL</strong><span>Template individual</span><CheckCircle2 size={18} /></div>
             </div>
-          )}
-        </div>
-      </aside>
-
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
-        <div className="panel overflow-hidden">
-          <PanelHeader
-            title="Editor"
-            action={
-              <div className="flex flex-wrap gap-2">
-                <button className="secondary-button" onClick={onPreview} disabled={busy === "templatePreview"} type="button">
-                  {busy === "templatePreview" ? <Loader2 className="animate-spin" size={16} /> : <Eye size={16} />}
-                  Preview
-                </button>
-                <button className="primary-button" onClick={onSave} disabled={busy === "template"} type="button">
-                  {busy === "template" ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
-                  Guardar
-                </button>
-                <button className="danger-button" onClick={onDelete} disabled={!templateForm.id || busy === "templateDelete"} type="button">
-                  <Trash2 size={16} aria-hidden="true" />
-                </button>
-              </div>
-            }
-          />
-          <div className="grid gap-4 p-4">
-            <Field label="Nome">
-              <input
-                className="field"
-                value={templateForm.name}
-                onChange={(event) => onChange({ ...templateForm, name: event.target.value })}
-              />
-            </Field>
-            <Field label="Assunto">
-              <input
-                className="field"
-                value={templateForm.subject}
-                onChange={(event) => onChange({ ...templateForm, subject: event.target.value })}
-              />
-            </Field>
-            <Field label="Texto">
-              <textarea
-                className="field min-h-44 resize-y"
-                value={templateForm.body_text}
-                onChange={(event) => onChange({ ...templateForm, body_text: event.target.value })}
-              />
-            </Field>
-            <Field label="HTML">
-              <textarea
-                className="field min-h-44 resize-y font-mono text-xs"
-                value={templateForm.body_html}
-                onChange={(event) => onChange({ ...templateForm, body_html: event.target.value })}
-              />
-            </Field>
-            <div className="flex flex-wrap gap-2">
-              {["{{name}}", "{{email}}", "{{company}}"].map((variable) => (
-                <code key={variable} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs">
-                  {variable}
-                </code>
-              ))}
+            <ImportActions back={() => setStep(2)} next={() => setStep(4)} />
+          </div>
+        )}
+        {step === 4 && preview && (
+          <div className="import-review">
+            <h3>Qualidade dos dados</h3>
+            <div className="import-metrics">
+              <Metric icon={UsersRound} label="Linhas" value={preview.summary.totalRows} detail="No ficheiro" />
+              <Metric icon={CheckCircle2} label="Válidas" value={preview.summary.valid} detail="Prontas a importar" tone="good" />
+              <Metric icon={RefreshCw} label="Existentes" value={preview.summary.existing} detail="Serão atualizadas" />
+              <Metric icon={XCircle} label="Com erro" value={preview.summary.invalid} detail="Não serão importadas" tone={preview.summary.invalid ? "warning" : "good"} />
+            </div>
+            {preview.groups.length > 0 && <div className="group-summary">{preview.groups.map((group) => <span key={group.name}><strong>{group.count}</strong> {group.name}</span>)}</div>}
+            {preview.invalidRows.length > 0 && (
+              <details className="error-details"><summary>Ver linhas com erro</summary><ul>{preview.invalidRows.map((row) => <li key={row.row}>Linha {row.row}: {row.errors.join(", ")}</li>)}</ul></details>
+            )}
+            <ImportActions back={() => setStep(3)} next={() => setStep(5)} />
+          </div>
+        )}
+        {step === 5 && preview && (
+          <div className="import-review">
+            <h3>Associação dos modelos</h3>
+            <p>O nome em MODELO_EMAIL é comparado com os ficheiros HTML selecionados.</p>
+            <div className="template-match-list">
+              {[...new Set([...preview.contacts, ...preview.invalidRows].map((contact) => contact.template_key).filter(Boolean))].map((key) => {
+                const contacts = [...preview.contacts, ...preview.invalidRows].filter((contact) => contact.template_key === key);
+                const matched = contacts.every((contact) => contact.template_matched);
+                return <div key={key}><span className={matched ? "match-icon match-good" : "match-icon match-bad"}>{matched ? <Check size={16} /> : <X size={16} />}</span><span><strong>{key}</strong><small>{contacts.length} destinatários</small></span><b>{matched ? "Associado" : "Em falta"}</b></div>;
+              })}
+            </div>
+            <ImportActions back={() => setStep(4)} next={() => setStep(6)} />
+          </div>
+        )}
+        {step === 6 && preview && (
+          <div className="import-confirm">
+            <span className="large-icon large-icon-good"><CheckCircle2 size={34} /></span>
+            <h3>Pronto para importar</h3>
+            <p><strong>{preview.summary.valid} pessoas</strong>, <strong>{preview.groups.length} segmentos</strong> e <strong>{preview.templates.length} templates</strong> serão guardados em {event.name}.</p>
+            <p className="privacy-note"><ShieldCheck size={17} /> Os dados ficam apenas na base local da aplicação.</p>
+            <div className="modal-actions modal-actions-centered">
+              <button className="button button-secondary" type="button" onClick={() => setStep(5)}>Voltar</button>
+              <button className="button button-primary" type="button" onClick={confirmImport} disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : <Upload size={17} />} Confirmar importação</button>
             </div>
           </div>
-        </div>
-
-        <aside className="panel h-fit overflow-hidden">
-          <PanelHeader title="Email renderizado" />
-          {renderedPreview ? (
-            <div className="p-4">
-              <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold">
-                {renderedPreview.subject}
-              </div>
-              {renderedPreview.html ? (
-                <div
-                  className="prose prose-sm max-w-none rounded-md border border-slate-200 p-3"
-                  dangerouslySetInnerHTML={{ __html: renderedPreview.html }}
-                />
-              ) : (
-                <pre className="whitespace-pre-wrap rounded-md border border-slate-200 p-3 text-sm">
-                  {renderedPreview.text}
-                </pre>
-              )}
-            </div>
-          ) : (
-            <EmptyState icon={Eye} title="Sem preview" />
-          )}
-        </aside>
-      </section>
-    </div>
+        )}
+      </div>
+    </Modal>
   );
 }
 
-function SmtpStep({ busy, smtpForm, smtpSettings, onChange, onSave, onTest }) {
-  return (
-    <section className="panel overflow-hidden">
-      <PanelHeader
-        title="Configuração SMTP"
-        action={
-          smtpSettings ? (
-            <Badge tone="good" icon={ShieldCheck}>
-              Guardado
-            </Badge>
-          ) : (
-            <Badge tone="warn" icon={AlertCircle}>
-              Pendente
-            </Badge>
-          )
+function Modal({ open, onClose, title, description, children, wide = false }) {
+  const dialogRef = useRef(null);
+  const triggerRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    triggerRef.current = document.activeElement;
+    const dialog = dialogRef.current;
+    const focusable = () => [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')];
+    const first = focusable()[0];
+    first?.focus();
+    function keydown(event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+      if (event.key === "Tab") {
+        const items = focusable();
+        const firstItem = items[0];
+        const lastItem = items.at(-1);
+        if (event.shiftKey && document.activeElement === firstItem) {
+          event.preventDefault();
+          lastItem?.focus();
+        } else if (!event.shiftKey && document.activeElement === lastItem) {
+          event.preventDefault();
+          firstItem?.focus();
         }
-      />
-      <div className="grid gap-4 p-4 lg:grid-cols-2">
-        <Field label="SMTP Host">
-          <input
-            className="field"
-            value={smtpForm.host}
-            onChange={(event) => onChange({ ...smtpForm, host: event.target.value })}
-            placeholder="smtp.exemplo.com"
-          />
-        </Field>
-        <Field label="Porta">
-          <input
-            className="field"
-            type="number"
-            min="1"
-            value={smtpForm.port}
-            onChange={(event) => onChange({ ...smtpForm, port: event.target.value })}
-          />
-        </Field>
-        <Field label="Email remetente">
-          <input
-            className="field"
-            value={smtpForm.from_email}
-            onChange={(event) => onChange({ ...smtpForm, from_email: event.target.value })}
-            placeholder="nome@dominio.com"
-          />
-        </Field>
-        <Field label="Password / App Password">
-          <input
-            className="field"
-            type="password"
-            value={smtpForm.password}
-            onChange={(event) => onChange({ ...smtpForm, password: event.target.value })}
-            placeholder={smtpSettings?.hasPassword ? "Password já guardada" : ""}
-          />
-        </Field>
-        <Field label="Emails por minuto">
-          <input
-            className="field"
-            type="number"
-            min="1"
-            max="60"
-            value={smtpForm.max_per_minute}
-            onChange={(event) => onChange({ ...smtpForm, max_per_minute: event.target.value })}
-          />
-        </Field>
-        <div className="flex items-end">
-          <label className="flex h-10 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700">
-            <input
-              className="h-4 w-4 rounded border-slate-300 text-pine focus:ring-pine"
-              checked={Boolean(smtpForm.secure)}
-              onChange={(event) => onChange({ ...smtpForm, secure: event.target.checked })}
-              type="checkbox"
-            />
-            SSL/TLS
-          </label>
-        </div>
-      </div>
-      <div className="flex flex-wrap gap-2 border-t border-slate-200 p-4">
-        <button className="primary-button" onClick={onSave} disabled={busy === "smtp"} type="button">
-          {busy === "smtp" ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
-          Guardar
-        </button>
-        <button className="secondary-button" onClick={onTest} disabled={busy === "smtpTest"} type="button">
-          {busy === "smtpTest" ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
-          Testar ligação
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function SendStep({
-  busy,
-  contacts,
-  filteredContacts,
-  templates,
-  selectedContacts,
-  selectedContactIds,
-  selectedTemplateId,
-  smtpSettings,
-  campaignForm,
-  campaigns,
-  selectedCampaign,
-  onTemplateSelect,
-  onCampaignChange,
-  onSend,
-  onToggleContact,
-  onSelectAll,
-  onSelectNone,
-  onOpenCampaign,
-  onRefreshCampaigns,
-  sendSearch,
-  setSendSearch
-}) {
-  const canSend = contacts.length > 0 && templates.length > 0 && smtpSettings;
-  const totalSent = campaigns.reduce((total, campaign) => total + Number(campaign.sent || 0), 0);
-  const totalFailed = campaigns.reduce((total, campaign) => total + Number(campaign.failed || 0), 0);
-  const totalQueued = campaigns.reduce((total, campaign) => total + Number(campaign.queued || 0), 0);
-
+      }
+    }
+    document.addEventListener("keydown", keydown);
+    return () => {
+      document.removeEventListener("keydown", keydown);
+      triggerRef.current?.focus?.();
+    };
+  }, [onClose, open]);
+  if (!open) return null;
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
-      <section className="panel overflow-hidden">
-        <PanelHeader title="Envio" />
-        <div className="grid gap-4 p-4 lg:grid-cols-2">
-          <Field label="Campanha">
-            <input
-              className="field"
-              value={campaignForm.name}
-              onChange={(event) => onCampaignChange({ ...campaignForm, name: event.target.value })}
-              placeholder="Campanha sem nome"
-            />
-          </Field>
-          <Field label="Template">
-            <select
-              className="field"
-              value={selectedTemplateId}
-              onChange={(event) => onTemplateSelect(event.target.value)}
-            >
-              {templates.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          <Field label="Modo">
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                className={`secondary-button ${campaignForm.sendMode === "now" ? "border-pine text-pine" : ""}`}
-                onClick={() => onCampaignChange({ ...campaignForm, sendMode: "now" })}
-                type="button"
-              >
-                <Play size={16} aria-hidden="true" />
-                Agora
-              </button>
-              <button
-                className={`secondary-button ${campaignForm.sendMode === "scheduled" ? "border-pine text-pine" : ""}`}
-                onClick={() => onCampaignChange({ ...campaignForm, sendMode: "scheduled" })}
-                type="button"
-              >
-                <CalendarClock size={16} aria-hidden="true" />
-                Agendar
-              </button>
-            </div>
-          </Field>
-
-          <Field label="Data/hora">
-            <input
-              className="field"
-              type="datetime-local"
-              disabled={campaignForm.sendMode !== "scheduled"}
-              value={campaignForm.scheduledAt}
-              onChange={(event) => onCampaignChange({ ...campaignForm, scheduledAt: event.target.value })}
-            />
-          </Field>
-
-          <Field label="Intervalo entre emails">
-            <div className="flex items-center gap-2">
-              <Clock3 className="text-slate-400" size={18} aria-hidden="true" />
-              <input
-                className="field"
-                type="number"
-                min="1"
-                value={campaignForm.intervalSeconds}
-                onChange={(event) => onCampaignChange({ ...campaignForm, intervalSeconds: event.target.value })}
-              />
-              <span className="text-sm text-slate-500">seg</span>
-            </div>
-          </Field>
-
-          <Field label="Limite por minuto">
-            <input
-              className="field"
-              type="number"
-              min="1"
-              max={smtpSettings?.max_per_minute || 60}
-              value={campaignForm.maxPerMinute}
-              onChange={(event) => onCampaignChange({ ...campaignForm, maxPerMinute: event.target.value })}
-            />
-          </Field>
-        </div>
-
-        <div className="border-y border-slate-200 bg-slate-50 px-4 py-3">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <div className="text-sm font-semibold">Lista selecionada</div>
-              <div className="text-sm text-slate-500">{selectedContacts.length} de {contacts.length} contactos</div>
-            </div>
-            <div className="flex gap-2">
-              <button className="secondary-button" onClick={onSelectAll} disabled={contacts.length === 0} type="button">
-                Todos
-              </button>
-              <button className="secondary-button" onClick={onSelectNone} disabled={contacts.length === 0} type="button">
-                Nenhum
-              </button>
-            </div>
-          </div>
-
-          <div className="relative mb-3">
-            <input
-              type="text"
-              className="field pl-9 !py-1.5 text-xs"
-              placeholder="Pesquisar nesta lista..."
-              value={sendSearch}
-              onChange={(e) => setSendSearch(e.target.value)}
-            />
-            <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-slate-400">
-              <Search size={14} />
-            </div>
-          </div>
-
-          <div className="max-h-52 overflow-auto rounded-md border border-slate-200 bg-white">
-            {contacts.length === 0 ? (
-              <EmptyState icon={ContactRound} title="Sem contactos" compact />
-            ) : filteredContacts.length === 0 ? (
-              <EmptyState icon={Search} title="Nenhum contacto correspondente" compact />
-            ) : (
-              <div className="divide-y divide-slate-100">
-                {filteredContacts.map((contact) => (
-                  <label key={contact.id} className="flex items-center gap-3 px-3 py-2 text-sm cursor-pointer hover:bg-slate-50">
-                    <input
-                      className="h-4 w-4 rounded border-slate-300 text-pine focus:ring-pine"
-                      checked={selectedContactIds.includes(contact.id)}
-                      onChange={() => onToggleContact(contact.id)}
-                      type="checkbox"
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium">{contact.name}</span>
-                      <span className="block truncate text-slate-500">{contact.email}</span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-          <label className="flex items-center gap-2 text-sm font-semibold cursor-pointer">
-            <input
-              className="h-4 w-4 rounded border-slate-300 text-pine focus:ring-pine"
-              checked={Boolean(campaignForm.confirm)}
-              onChange={(event) => onCampaignChange({ ...campaignForm, confirm: event.target.checked })}
-              type="checkbox"
-            />
-            Confirmo o envio
-          </label>
-          <button className="primary-button" onClick={onSend} disabled={!canSend || busy === "campaign"} type="button">
-            {busy === "campaign" ? <Loader2 className="animate-spin" size={16} /> : <Send size={16} />}
-            Enviar
-          </button>
-        </div>
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className={`modal-card ${wide ? "modal-wide" : ""}`} ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-description">
+        <header className="modal-header">
+          <div><h2 id="modal-title">{title}</h2>{description && <p id="modal-description">{description}</p>}</div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Fechar janela"><X size={20} /></button>
+        </header>
+        <div className="modal-body">{children}</div>
       </section>
-
-      <aside className="grid gap-4">
-        <section className="panel overflow-hidden">
-          <PanelHeader
-            title="Monitorização"
-            action={
-              <button className="secondary-button" onClick={onRefreshCampaigns} type="button" title="Atualizar">
-                <RefreshCw size={16} aria-hidden="true" />
-              </button>
-            }
-          />
-          <div className="grid grid-cols-3 gap-2 p-4">
-            <Metric label="Enviados" value={totalSent} tone="good" />
-            <Metric label="Falhados" value={totalFailed} tone="bad" />
-            <Metric label="Em fila" value={totalQueued} tone="warn" />
-          </div>
-
-          {selectedCampaign ? (
-            <div className="border-t border-slate-200 p-4">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="truncate font-semibold">{selectedCampaign.name}</div>
-                  <div className="text-sm text-slate-500">{formatDate(selectedCampaign.created_at)}</div>
-                </div>
-                <StatusPill status={selectedCampaign.status} />
-              </div>
-              <div className="grid grid-cols-3 gap-2 text-sm">
-                <Metric label="Total" value={selectedCampaign.total} />
-                <Metric label="OK" value={selectedCampaign.sent} tone="good" />
-                <Metric label="Erro" value={selectedCampaign.failed} tone="bad" />
-              </div>
-              {selectedCampaign.logs?.length ? (
-                <div className="mt-3 max-h-40 overflow-auto rounded-md border border-slate-200">
-                  {selectedCampaign.logs.map((log) => (
-                    <div key={log.id} className="border-b border-slate-100 px-3 py-2 text-xs last:border-b-0">
-                      <div className="font-semibold text-red-700">{log.level}</div>
-                      <div className="text-slate-600">{log.message}</div>
-                      <div className="mt-1 text-slate-400">{formatDate(log.created_at)}</div>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ) : (
-            <EmptyState icon={Send} title="Sem campanhas" />
-          )}
-        </section>
-
-        <section className="panel overflow-hidden">
-          <PanelHeader title="Histórico" />
-          <div className="max-h-80 overflow-auto">
-            {campaigns.length === 0 ? (
-              <EmptyState icon={FileText} title="Sem histórico" compact />
-            ) : (
-              <div className="divide-y divide-slate-100">
-                {campaigns.map((campaign) => (
-                  <button
-                    key={campaign.id}
-                    className="focus-ring block w-full px-4 py-3 text-left hover:bg-slate-50"
-                    onClick={() => onOpenCampaign(campaign.id)}
-                    type="button"
-                  >
-                    <div className="mb-1 flex items-center justify-between gap-2">
-                      <span className="truncate font-semibold">{campaign.name}</span>
-                      <StatusPill status={campaign.status} />
-                    </div>
-                    <div className="text-sm text-slate-500">
-                      {campaign.template_name} · {campaign.sent}/{campaign.total}
-                    </div>
-                    <div className="text-xs text-slate-400">{formatDate(campaign.created_at)}</div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </section>
-      </aside>
     </div>
   );
 }
 
-function PanelHeader({ title, action }) {
+function FileDrop({ id, icon: Icon, title, description, accept, multiple, fileNames, onFiles }) {
   return (
-    <div className="flex min-h-16 items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
-      <h2 className="text-base font-bold">{title}</h2>
-      {action}
-    </div>
-  );
-}
-
-function Field({ label, children }) {
-  return (
-    <label className="grid gap-1">
-      <span className="label">{label}</span>
-      {children}
+    <label className="file-drop" htmlFor={id}>
+      <span className="file-drop-icon"><Icon size={25} /></span>
+      <strong>{title}</strong>
+      <span>{description}</span>
+      <span className="button button-secondary" aria-hidden="true">Escolher ficheiro{multiple ? "s" : ""}</span>
+      <input className="sr-only" id={id} type="file" accept={accept} multiple={multiple} onChange={(e) => onFiles(e.target.files)} />
+      {fileNames.length > 0 && <ul>{fileNames.map((name) => <li key={name}><CheckCircle2 size={14} /> {name}</li>)}</ul>}
     </label>
   );
 }
 
-function Metric({ label, value, tone = "neutral" }) {
-  const tones = {
-    neutral: "text-ink",
-    good: "text-pine",
-    warn: "text-amberline",
-    bad: "text-coral"
-  };
+function ImportActions({ back, next }) {
+  return <div className="modal-actions modal-actions-full"><button className="button button-secondary" type="button" onClick={back}>Voltar</button><button className="button button-primary" type="button" onClick={next}>Continuar</button></div>;
+}
 
+function Metric({ icon: Icon, label, value, detail, tone = "" }) {
   return (
-    <div className="metric">
-      <div className="text-xs text-slate-500">{label}</div>
-      <div className={`text-lg font-bold ${tones[tone]}`}>{value}</div>
-    </div>
+    <article className={`metric-card ${tone ? `metric-${tone}` : ""}`}>
+      <span className="metric-icon"><Icon size={20} aria-hidden="true" /></span>
+      <div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
+    </article>
   );
 }
 
-function Badge({ tone = "neutral", icon: Icon, children }) {
-  const classes = {
-    neutral: "border-slate-200 bg-slate-50 text-slate-700",
-    good: "border-emerald-200 bg-emerald-50 text-emerald-700",
-    warn: "border-amber-200 bg-amber-50 text-amber-700",
-    bad: "border-red-200 bg-red-50 text-red-700"
-  };
+function PanelTitle({ title, subtitle, action }) {
+  return <header className="panel-title"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>{action}</header>;
+}
 
-  return (
-    <span className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-semibold ${classes[tone]}`}>
-      {Icon ? <Icon size={14} aria-hidden="true" /> : null}
-      {children}
-    </span>
-  );
+function Field({ label, htmlFor, hint, children }) {
+  const hintId = hint ? `${htmlFor}-hint` : undefined;
+  const child = children
+    ? cloneElement(children, { "aria-describedby": hintId })
+    : children;
+  return <div className="field-group"><label htmlFor={htmlFor}>{label}</label>{hint && <span id={hintId}>{hint}</span>}{child}</div>;
+}
+
+function ReviewItem({ ready, label, action }) {
+  return <li className={ready ? "review-ready" : "review-pending"}><span>{ready ? <Check size={15} aria-label="Pronto" /> : <AlertCircle size={16} aria-label="Pendente" />}</span><strong>{label}</strong>{action && <button type="button" onClick={action}>Configurar</button>}</li>;
 }
 
 function StatusPill({ status }) {
-  const tone = status === "completed"
-    ? "good"
-    : status === "failed" || status === "completed_with_errors"
-      ? "bad"
-      : status === "queued" || status === "scheduled"
-        ? "warn"
-        : "neutral";
-
-  return <Badge tone={tone}>{statusLabel(status)}</Badge>;
+  const good = ["active", "completed", "sent"].includes(status);
+  const bad = ["failed", "completed_with_errors"].includes(status);
+  return <span className={`status-pill ${good ? "status-good" : bad ? "status-bad" : ""}`}>{good && <CheckCircle2 size={13} />}{bad && <AlertCircle size={13} />}{status === "archived" ? "Arquivado" : status === "active" ? "Ativo" : statusLabel(status)}</span>;
 }
 
-function EmptyState({ icon: Icon, title, compact = false }) {
-  return (
-    <div className={`flex flex-col items-center justify-center gap-2 text-slate-400 ${compact ? "py-8" : "min-h-48 py-10"}`}>
-      <Icon size={24} aria-hidden="true" />
-      <div className="text-sm font-semibold">{title}</div>
-    </div>
-  );
+function FriendlyEmpty({ icon: Icon, title, text, actionLabel, onAction, compact = false }) {
+  return <div className={`friendly-empty ${compact ? "friendly-empty-compact" : ""}`}><span><Icon size={compact ? 21 : 26} /></span><h3>{title}</h3><p>{text}</p>{actionLabel && <button className="button button-secondary" type="button" onClick={onAction}>{actionLabel}</button>}</div>;
 }
 
-function LoadingBlock({ label }) {
+function Notice({ notice, onClose }) {
   return (
-    <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-slate-500">
-      <Loader2 className="animate-spin text-pine" size={18} aria-hidden="true" />
-      <span>{label}</span>
-    </div>
-  );
-}
-
-function PreviewRows({ title, rows, type }) {
-  return (
-    <div className="p-4">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-sm font-bold">{title}</span>
-        <Badge tone={type === "valid" ? "good" : "bad"}>{rows.length}</Badge>
+    <div className={`notice ${notice.type === "error" ? "notice-error" : notice.type === "info" ? "notice-info" : "notice-success"}`} role={notice.type === "error" ? "alert" : "status"}>
+      {notice.type === "error" ? <XCircle size={19} /> : notice.type === "info" ? <HelpCircle size={19} /> : <CheckCircle2 size={19} />}
+      <div><strong>{notice.type === "error" ? "Não foi possível concluir" : notice.type === "info" ? "Ajuda rápida" : "Concluído"}</strong><span>{notice.message}</span>
+        {notice.details?.invalidRecipients?.length > 0 && <details><summary>Ver o que precisa de atenção</summary><ul>{notice.details.invalidRecipients.slice(0, 12).map((item) => <li key={item.email}>{item.name}: {item.missing.join(", ")}</li>)}</ul></details>}
       </div>
-      {rows.length === 0 ? (
-        <div className="text-sm text-slate-400">-</div>
-      ) : (
-        <div className="space-y-2">
-          {rows.map((row, index) => (
-            <div key={`${row.email || row.row}-${index}`} className="rounded-md border border-slate-200 bg-white p-2 text-sm">
-              <div className="font-semibold">{row.name || `Linha ${row.row}`}</div>
-              <div className="break-all text-slate-500">{row.email || "-"}</div>
-              {row.company ? <div className="text-slate-500">{row.company}</div> : null}
-              {row.errors?.length ? (
-                <div className="mt-1 text-xs text-red-700">{row.errors.join(", ")}</div>
-              ) : null}
-            </div>
-          ))}
-        </div>
-      )}
+      <button className="icon-button" type="button" onClick={onClose} aria-label="Fechar mensagem"><X size={17} /></button>
     </div>
   );
 }
 
-function AddContactModal({ isOpen, onClose, onSave, showNotice }) {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [company, setCompany] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [errorMsg, setErrorMsg] = useState(null);
-
-  if (!isOpen) return null;
-
-  async function handleSubmit(e) {
-    e.preventDefault();
-    if (!name.trim()) {
-      setErrorMsg("O nome é obrigatório.");
-      return;
-    }
-    if (!email.trim()) {
-      setErrorMsg("O e-mail é obrigatório.");
-      return;
-    }
-
-    setSaving(true);
-    setErrorMsg(null);
-    try {
-      const data = await api("/api/contacts", {
-        method: "POST",
-        body: JSON.stringify({
-          name: name.trim(),
-          email: email.trim(),
-          company: company.trim()
-        })
-      });
-
-      await onSave(data.contact);
-      setName("");
-      setEmail("");
-      setCompany("");
-      onClose();
-      showNotice("success", "Contacto adicionado com sucesso!");
-    } catch (err) {
-      setErrorMsg(err.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div 
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-200"
-      role="dialog"
-      aria-modal="true"
-    >
-      <div className="panel w-full max-w-md overflow-hidden bg-white shadow-soft animate-in zoom-in-95 duration-200">
-        <PanelHeader 
-          title="Adicionar Contacto" 
-          action={
-            <button 
-              type="button" 
-              className="text-slate-400 hover:text-slate-600 focus-ring rounded-md p-1"
-              onClick={onClose}
-              disabled={saving}
-            >
-              <XCircle size={20} />
-            </button>
-          } 
-        />
-        <form onSubmit={handleSubmit} className="p-4 grid gap-4">
-          {errorMsg && (
-            <div className="flex items-center gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-              <AlertCircle size={16} className="shrink-0" />
-              <span>{errorMsg}</span>
-            </div>
-          )}
-
-          <Field label="Nome">
-            <input
-              type="text"
-              className="field"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Ex: Maria Santos"
-              required
-              disabled={saving}
-            />
-          </Field>
-
-          <Field label="Email">
-            <input
-              type="email"
-              className="field"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="Ex: maria.santos@empresa.com"
-              required
-              disabled={saving}
-            />
-          </Field>
-
-          <Field label="Empresa">
-            <input
-              type="text"
-              className="field"
-              value={company}
-              onChange={(e) => setCompany(e.target.value)}
-              placeholder="Ex: Empresa Exemplo (Opcional)"
-              disabled={saving}
-            />
-          </Field>
-
-          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4 mt-2">
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={onClose}
-              disabled={saving}
-            >
-              Cancelar
-            </button>
-            <button
-              type="submit"
-              className="primary-button"
-              disabled={saving}
-            >
-              {saving ? (
-                <>
-                  <Loader2 className="animate-spin" size={16} />
-                  A guardar...
-                </>
-              ) : (
-                <>
-                  <Save size={16} />
-                  Guardar
-                </>
-              )}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
+function ErrorSummary({ message }) {
+  const ref = useRef(null);
+  useEffect(() => { ref.current?.focus(); }, [message]);
+  return <div className="error-summary" role="alert" tabIndex="-1" ref={ref}><AlertCircle size={18} /><span><strong>Verifique esta informação</strong>{message}</span></div>;
 }
 
+function LoadingState({ label }) {
+  return <div className="loading-state" role="status"><Loader2 className="spin" size={30} /><span>{label}</span></div>;
+}
+
+function EmptyWorkspace({ onCreate }) {
+  return <div className="empty-workspace"><img className="empty-brand-logo" src="/lifeinternet-brand.png" alt="LifeInternet" /><h1 id="page-title">Bem-vindo ao LifeInternet Mail Studio</h1><p>Crie o primeiro evento para começar a organizar o público e os emails.</p><button className="button button-primary" type="button" onClick={onCreate}><Plus size={18} /> Criar primeiro evento</button></div>;
+}
+
+function smtpLabel(event) {
+  return event?.name ? `${event.name} · LifeInternet Mail Studio` : "LifeInternet Mail Studio";
+}
