@@ -2,9 +2,31 @@
 
 **Criado por:** Rômulo Shermans (2026)
 
-O **LifeInternet Mail Studio** é um produto da LifeInternet Startup para organizar eventos, públicos, templates e campanhas de email personalizadas através de um servidor SMTP próprio. A aplicação preserva campos dinâmicos de cada evento, associa diferentes modelos aos respetivos segmentos e valida todos os destinatários antes do envio.
+O **LifeInternet Mail Studio** é uma plataforma operacional para organizar eventos, públicos, templates e campanhas de email personalizadas através de um servidor SMTP próprio. A aplicação preserva campos dinâmicos por evento, associa diferentes modelos aos respetivos segmentos, valida destinatários e ajuda a entregar campanhas com controlo, clareza e responsabilidade.
 
 A identidade visual combina lettering metálico verde–laranja com um globo formado por pontos, órbitas e fluxos de dados. O ativo principal está em `public/lifeinternet-brand.png`.
+
+## 🧭 Visão executiva do produto
+
+Este produto foi desenhado para reduzir a fricção entre a criação de campanhas e a execução real de envio. Em vez de mover dados entre múltiplas ferramentas, o utilizador consegue:
+
+- criar e gerir eventos
+- importar públicos em CSV
+- segmentar por grupo ou contexto
+- atribuir templates por pessoa ou por grupo
+- testar e guardar credenciais SMTP
+- enviar campanhas imediatas ou agendadas
+- acompanhar entregues, falhas e histórico
+
+## 🚀 Fluxo recomendado de início rápido
+
+1. Crie um evento
+2. Importe o público em CSV
+3. Valide nomes, emails e segmentos
+4. Crie ou importe o template HTML
+5. Configure o SMTP e teste a ligação
+6. Seleccione os destinatários e confirme a campanha
+7. Revise o histórico após o envio
 
 ---
 

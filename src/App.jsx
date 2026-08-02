@@ -363,6 +363,7 @@ export default function App() {
                   event={event}
                   events={events}
                   readiness={readiness}
+                  smtpSettings={smtpSettings}
                   onOpenView={openView}
                   onCreate={() => setCreateOpen(true)}
                   onImport={() => setImportOpen(true)}
@@ -444,9 +445,49 @@ function PageHeading({ eyebrow, title, description, action }) {
   );
 }
 
-function Overview({ event, events, readiness, onOpenView, onCreate, onImport, onSelectEvent }) {
+function Overview({ event, events, readiness, smtpSettings, onOpenView, onCreate, onImport, onSelectEvent }) {
   const delivered = event.campaigns.reduce((sum, campaign) => sum + Number(campaign.sent || 0), 0);
   const failed = event.campaigns.reduce((sum, campaign) => sum + Number(campaign.failed || 0), 0);
+  const onboardingSteps = [
+    {
+      label: "Criar o evento",
+      detail: "Defina o contexto e o objetivo da campanha.",
+      ready: Boolean(event.name),
+      view: "overview"
+    },
+    {
+      label: "Importar público",
+      detail: "Valide contactos, grupos e colunas personalizadas.",
+      ready: (event.contacts?.length || 0) > 0,
+      view: "audience"
+    },
+    {
+      label: "Preparar template",
+      detail: "Associe modelos ao grupo correto e teste o preview.",
+      ready: (event.templates?.length || 0) > 0,
+      view: "templates"
+    },
+    {
+      label: "Configurar SMTP",
+      detail: "Teste a ligação antes de lançar a campanha.",
+      ready: Boolean(smtpSettings),
+      view: "settings"
+    },
+    {
+      label: "Enviar campanha",
+      detail: "Revise, confirme e lance a mensagem ao público.",
+      ready:
+        (event.contacts?.length || 0) > 0 &&
+        (event.templates?.length || 0) > 0 &&
+        Boolean(smtpSettings),
+      view: "campaigns"
+    }
+  ];
+
+  const onboardingProgress = Math.round(
+    (onboardingSteps.filter((step) => step.ready).length / onboardingSteps.length) * 100
+  );
+
   return (
     <div className="page-stack">
       <PageHeading
@@ -464,6 +505,58 @@ function Overview({ event, events, readiness, onOpenView, onCreate, onImport, on
           </>
         }
       />
+
+      <section className="mission-panel" aria-labelledby="mission-heading">
+        <div className="mission-header">
+          <div className="hero-copy">
+            <span className="hero-kicker"><Sparkles size={17} /> Comece aqui</span>
+            <h2 id="mission-heading">Fluxo de lançamento em 5 etapas</h2>
+            <p>O Mail Studio orienta o primeiro envio com uma jornada clara, segura e motivadora.</p>
+          </div>
+          <div className="mission-progress" aria-label={`Progresso de onboarding: ${onboardingProgress}%`}>
+            <strong>{onboardingProgress}%</strong>
+            <span>pronto</span>
+          </div>
+        </div>
+
+        <div className="mission-steps">
+          {onboardingSteps.map((step, index) => (
+            <button key={step.label} type="button" className={step.ready ? "mission-step mission-step-ready" : "mission-step"} onClick={() => onOpenView(step.view)}>
+              <span className={step.ready ? "step-number step-done" : "step-number"}>
+                {step.ready ? <Check size={16} aria-label="Concluído" /> : index + 1}
+              </span>
+              <span className="mission-copy">
+                <strong>{step.label}</strong>
+                <small>{step.detail}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="insight-grid" aria-label="Proposta de valor do produto">
+        <article className="insight-card">
+          <span className="insight-icon"><Gauge size={18} /></span>
+          <div>
+            <strong>Menos fricção</strong>
+            <p>Todo o processo, desde público até envio, fica num único espaço operacional.</p>
+          </div>
+        </article>
+        <article className="insight-card">
+          <span className="insight-icon"><ShieldCheck size={18} /></span>
+          <div>
+            <strong>Mais controlo</strong>
+            <p>Validação de emails, segmentos, templates e SMTP antes da campanha sair.</p>
+          </div>
+        </article>
+        <article className="insight-card">
+          <span className="insight-icon"><Send size={18} /></span>
+          <div>
+            <strong>Mais velocidade</strong>
+            <p>O primeiro envio deixa de ser um processo técnico e passa a ser uma missão guiada.</p>
+          </div>
+        </article>
+      </section>
 
       <section className="hero-panel" aria-labelledby="readiness-heading">
         <div className="hero-copy">
