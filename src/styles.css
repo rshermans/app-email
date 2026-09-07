@@ -1035,6 +1035,37 @@ p {
   font-weight: 700;
 }
 
+.bulk-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  border-bottom: 1px solid var(--border-soft);
+  padding: 12px 16px;
+  background: #fbfcfd;
+}
+
+.bulk-actions strong {
+  margin-right: 4px;
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.bulk-template-control {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.bulk-template-control select {
+  min-width: 190px;
+}
+
+.danger-button {
+  color: var(--danger);
+}
+
 input,
 select,
 textarea {
@@ -1173,6 +1204,93 @@ td {
   color: var(--muted);
   font-size: 11px;
   white-space: nowrap;
+}
+
+.data-count-filled {
+  color: var(--green-dark);
+  font-weight: 800;
+}
+
+.data-count-empty {
+  color: var(--muted);
+}
+
+.custom-fields-section {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #cfe2df;
+  border-radius: 10px;
+  background: #f5fbfa;
+  padding: 15px;
+}
+
+.custom-fields-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.custom-fields-header h3 {
+  margin-bottom: 4px;
+  color: var(--navy);
+  font-size: 13px;
+}
+
+.custom-fields-header p,
+.custom-fields-empty {
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.custom-field-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.custom-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.custom-field-row .icon-button {
+  margin-bottom: 1px;
+}
+
+.manual-field-builder {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(140px, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  border-top: 1px solid #dcece9;
+  padding-top: 13px;
+}
+
+.manual-field-builder .button {
+  min-height: 40px;
+}
+
+.advanced-json {
+  border-top: 1px solid #dcece9;
+  padding-top: 11px;
+}
+
+.advanced-json summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--navy);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.advanced-json[open] summary {
+  margin-bottom: 11px;
 }
 
 .row-actions {
@@ -2662,6 +2780,18 @@ td {
 
   .readiness-list button {
     min-height: 78px;
+  }
+
+  .custom-fields-header {
+    flex-direction: column;
+  }
+
+  .manual-field-builder {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-field-builder .button {
+    width: 100%;
   }
 
   .segment-row {

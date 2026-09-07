@@ -79,6 +79,57 @@ const emptyCampaign = {
   confirm: false
 };
 
+const templateTokenPattern = /\{\{\s*([\p{L}\p{N}_ -]+?)\s*\}\}/gu;
+const participantBaseVariables = new Set([
+  "NOME",
+  "NAME",
+  "EMAIL",
+  "MAIL",
+  "EMPRESA",
+  "COMPANY",
+  "COMPANHIA",
+  "GRUPO",
+  "ASSINATURA"
+]);
+
+function normalizeVariableKey(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+}
+
+function extractTemplateVariables(template = {}) {
+  const variables = new Set();
+  [template.subject, template.body_text, template.body_html].forEach((input) => {
+    for (const match of String(input || "").matchAll(templateTokenPattern)) {
+      const key = normalizeVariableKey(match[1]);
+      if (key) variables.add(key);
+    }
+  });
+  return [...variables].sort();
+}
+
+function syncFieldsText(fields) {
+  return JSON.stringify(fields || {}, null, 2);
+}
+
+function dataFieldKeys(fields = {}) {
+  return Object.entries(fields)
+    .filter(([, value]) => String(value ?? "").trim() !== "")
+    .map(([key]) => key)
+    .sort();
+}
+
+function dataCountLabel(fields = {}) {
+  const count = dataFieldKeys(fields).length;
+  if (count === 0) return "Sem campos";
+  return `${count} campo${count === 1 ? "" : "s"}`;
+}
+
 function escapeMarkup(value) {
   return String(value || "")
     .replaceAll("&", "&amp;")
@@ -91,7 +142,16 @@ function htmlForPreview(rendered) {
   return `<!doctype html><html lang="pt-PT"><head><meta charset="utf-8"><style>body{font-family:Arial,sans-serif;padding:28px;color:#12212b;line-height:1.6}pre{white-space:pre-wrap;font:inherit}</style></head><body><pre>${escapeMarkup(rendered?.text)}</pre></body></html>`;
 }
 
+function redactReservedFields(fields = {}) {
+  return Object.fromEntries(
+    Object.entries(fields || {})
+      .filter(([key]) => !participantBaseVariables.has(normalizeVariableKey(key)))
+      .map(([key, value]) => [key, value])
+  );
+}
+
 function participantForm(contact = null) {
+  const fields = redactReservedFields(contact?.fields || {});
   return {
     event_contact_id: contact?.event_contact_id || null,
     name: contact?.name || "",
@@ -100,7 +160,10 @@ function participantForm(contact = null) {
     group_name: contact?.group_name || "",
     template_id: contact?.template_id || "",
     selected_for_email: contact?.selected_for_email ?? true,
-    fieldsText: JSON.stringify(contact?.fields || {}, null, 2)
+    fields,
+    fieldsText: syncFieldsText(fields),
+    newFieldKey: "",
+    newFieldValue: ""
   };
 }
 
@@ -642,6 +705,8 @@ function Overview({ event, events, readiness, smtpSettings, onOpenView, onCreate
 function Audience({ event, onImport, onRefresh, announce }) {
   const [search, setSearch] = useState("");
   const [group, setGroup] = useState("all");
+  const [bulkSelectedIds, setBulkSelectedIds] = useState([]);
+  const [bulkTemplateId, setBulkTemplateId] = useState("");
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingContact, setEditingContact] = useState(null);
   const filtered = useMemo(() => event.contacts.filter((contact) => {
@@ -654,6 +719,57 @@ function Audience({ event, onImport, onRefresh, announce }) {
     return matchesSearch && matchesGroup;
   }), [event.contacts, group, search]);
   const selectedCount = event.contacts.filter((contact) => contact.selected_for_email).length;
+  const bulkSelectedCount = bulkSelectedIds.length;
+  const filteredIds = filtered.map((contact) => contact.event_contact_id);
+  const allFilteredSelected = filtered.length > 0 && filteredIds.every((id) => bulkSelectedIds.includes(id));
+
+  useEffect(() => {
+    setBulkSelectedIds([]);
+    setBulkTemplateId("");
+  }, [event.id]);
+
+  function toggleBulkSelection(eventContactId) {
+    setBulkSelectedIds((current) => current.includes(eventContactId)
+      ? current.filter((id) => id !== eventContactId)
+      : [...current, eventContactId]);
+  }
+
+  function toggleFilteredSelection() {
+    setBulkSelectedIds((current) => allFilteredSelected
+      ? current.filter((id) => !filteredIds.includes(id))
+      : [...new Set([...current, ...filteredIds])]);
+  }
+
+  async function runBulkAction(action, extra = {}) {
+    try {
+      await api(`/api/events/${event.id}/contacts/bulk`, {
+        method: "POST",
+        body: JSON.stringify({ action, eventContactIds: bulkSelectedIds, ...extra })
+      });
+      setBulkSelectedIds([]);
+      setBulkTemplateId("");
+      await onRefresh();
+      announce(
+        "success",
+        action === "clear_all"
+          ? "Todos os participantes foram removidos do evento."
+          : "Ação aplicada aos participantes selecionados."
+      );
+    } catch (error) {
+      announce("error", error.message);
+    }
+  }
+
+  async function assignBulkTemplate() {
+    if (!bulkTemplateId) return;
+    await runBulkAction("assign_template", { templateId: Number(bulkTemplateId) });
+  }
+
+  async function clearAllContacts() {
+    const confirmation = window.prompt(`Para limpar todos os participantes, escreva: ${event.name}`);
+    if (confirmation !== event.name) return;
+    await runBulkAction("clear_all");
+  }
 
   function openEditor(contact = null) {
     setEditingContact(contact);
@@ -763,12 +879,43 @@ function Audience({ event, onImport, onRefresh, announce }) {
           </div>
           <span className="result-count" aria-live="polite">{filtered.length} de {event.contacts.length}</span>
         </div>
+        <div className="bulk-actions" aria-label="Ações para participantes selecionados">
+          <strong>{bulkSelectedCount} selecionados</strong>
+          <button className="button button-secondary" type="button" disabled={!bulkSelectedCount} onClick={() => runBulkAction("set_selected", { selected: true })}>
+            <Check size={16} /> Incluir no envio
+          </button>
+          <button className="button button-secondary" type="button" disabled={!bulkSelectedCount} onClick={() => runBulkAction("set_selected", { selected: false })}>
+            <X size={16} /> Não enviar
+          </button>
+          <div className="bulk-template-control">
+            <label className="sr-only" htmlFor="bulk-template">Modelo para selecionados</label>
+            <select id="bulk-template" value={bulkTemplateId} onChange={(e) => setBulkTemplateId(e.target.value)} disabled={!bulkSelectedCount}>
+              <option value="">Atribuir modelo...</option>
+              {event.templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+            </select>
+            <button className="button button-secondary" type="button" disabled={!bulkSelectedCount || !bulkTemplateId} onClick={assignBulkTemplate}>
+              <FileCode2 size={16} /> Atribuir
+            </button>
+          </div>
+          <button className="button button-secondary danger-button" type="button" disabled={!bulkSelectedCount} onClick={() => runBulkAction("delete")}>
+            <Trash2 size={16} /> Excluir
+          </button>
+          <button className="button button-secondary danger-button" type="button" disabled={!event.contacts.length} onClick={clearAllContacts}>
+            <Trash2 size={16} /> Limpar evento
+          </button>
+        </div>
         {filtered.length ? (
           <div className="table-scroll">
             <table>
               <caption id="audience-title">Destinatários do evento {event.name}</caption>
               <thead>
                 <tr>
+                  <th scope="col">
+                    <label className="selection-toggle">
+                      <input type="checkbox" checked={allFilteredSelected} onChange={toggleFilteredSelection} />
+                      <span className="sr-only">Selecionar participantes visíveis</span>
+                    </label>
+                  </th>
                   <th scope="col">Envio</th>
                   <th scope="col">Pessoa</th>
                   <th scope="col">Segmento</th>
@@ -778,50 +925,63 @@ function Audience({ event, onImport, onRefresh, announce }) {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((contact) => (
-                  <tr className={contact.selected_for_email ? "" : "row-muted"} key={contact.event_contact_id}>
-                    <td>
-                      <label className="selection-toggle">
-                        <input
-                          type="checkbox"
-                          checked={contact.selected_for_email}
-                          onChange={() => toggleSelected(contact)}
-                        />
-                        <span>{contact.selected_for_email ? "Selecionado" : "Não enviar"}</span>
-                      </label>
-                    </td>
-                    <td>
-                      <div className="person-cell">
-                        <span className="person-avatar" aria-hidden="true">{contact.name.slice(0, 1).toUpperCase()}</span>
-                        <span><strong>{contact.name}</strong><small>{contact.email}</small></span>
-                      </div>
-                    </td>
-                    <td><span className="soft-pill">{contact.group_name || "Sem grupo"}</span></td>
-                    <td>
-                      <label className="sr-only" htmlFor={`template-${contact.event_contact_id}`}>Modelo para {contact.name}</label>
-                      <select
-                        className={contact.template_id ? "inline-select" : "inline-select inline-select-warning"}
-                        id={`template-${contact.event_contact_id}`}
-                        value={contact.template_id || ""}
-                        onChange={(e) => assignTemplate(contact, Number(e.target.value) || null)}
-                      >
-                        <option value="">Sem modelo</option>
-                        {event.templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
-                      </select>
-                    </td>
-                    <td><span className="data-count">{Object.keys(contact.fields || {}).length} campos</span></td>
-                    <td>
-                      <div className="row-actions">
-                        <button className="icon-button" type="button" onClick={() => openEditor(contact)} aria-label={`Editar ${contact.name}`} title="Editar">
-                          <Pencil size={16} />
-                        </button>
-                        <button className="icon-button danger-icon" type="button" onClick={() => removeContact(contact)} aria-label={`Remover ${contact.name}`} title="Remover">
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {filtered.map((contact) => {
+                  const keys = dataFieldKeys(contact.fields || {});
+                  return (
+                    <tr className={contact.selected_for_email ? "" : "row-muted"} key={contact.event_contact_id}>
+                      <td>
+                        <label className="selection-toggle">
+                          <input
+                            type="checkbox"
+                            checked={bulkSelectedIds.includes(contact.event_contact_id)}
+                            onChange={() => toggleBulkSelection(contact.event_contact_id)}
+                          />
+                          <span className="sr-only">Selecionar {contact.name} para ação</span>
+                        </label>
+                      </td>
+                      <td>
+                        <label className="selection-toggle">
+                          <input
+                            type="checkbox"
+                            checked={contact.selected_for_email}
+                            onChange={() => toggleSelected(contact)}
+                          />
+                          <span>{contact.selected_for_email ? "Selecionado" : "Não enviar"}</span>
+                        </label>
+                      </td>
+                      <td>
+                        <div className="person-cell">
+                          <span className="person-avatar" aria-hidden="true">{contact.name.slice(0, 1).toUpperCase()}</span>
+                          <span><strong>{contact.name}</strong><small>{contact.email}</small></span>
+                        </div>
+                      </td>
+                      <td><span className="soft-pill">{contact.group_name || "Sem grupo"}</span></td>
+                      <td>
+                        <label className="sr-only" htmlFor={`template-${contact.event_contact_id}`}>Modelo para {contact.name}</label>
+                        <select
+                          className={contact.template_id ? "inline-select" : "inline-select inline-select-warning"}
+                          id={`template-${contact.event_contact_id}`}
+                          value={contact.template_id || ""}
+                          onChange={(e) => assignTemplate(contact, Number(e.target.value) || null)}
+                        >
+                          <option value="">Sem modelo</option>
+                          {event.templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+                        </select>
+                      </td>
+                      <td><span className={keys.length ? "data-count data-count-filled" : "data-count data-count-empty"} title={keys.length ? keys.join(", ") : "Sem campos personalizados"}>{dataCountLabel(contact.fields || {})}</span></td>
+                      <td>
+                        <div className="row-actions">
+                          <button className="icon-button" type="button" onClick={() => openEditor(contact)} aria-label={`Editar ${contact.name}`} title="Editar">
+                            <Pencil size={16} />
+                          </button>
+                          <button className="icon-button danger-icon" type="button" onClick={() => removeContact(contact)} aria-label={`Remover ${contact.name}`} title="Remover">
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -847,6 +1007,27 @@ function ParticipantModal({ open, event, contact, onClose, onSave }) {
   const [form, setForm] = useState(participantForm(contact));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const selectedTemplate = useMemo(
+    () => event.templates.find((template) => template.id === Number(form.template_id)),
+    [event.templates, form.template_id]
+  );
+  const templateFieldKeys = useMemo(
+    () => selectedTemplate
+      ? extractTemplateVariables(selectedTemplate).filter((key) => !participantBaseVariables.has(key))
+      : [],
+    [selectedTemplate]
+  );
+  const extraFieldKeys = useMemo(() => {
+    const templateKeys = new Set(templateFieldKeys);
+    return Object.keys(form.fields || {})
+      .map(normalizeVariableKey)
+      .filter((key) => key && !participantBaseVariables.has(key) && !templateKeys.has(key))
+      .filter((key, index, keys) => keys.indexOf(key) === index)
+      .sort();
+  }, [form.fields, templateFieldKeys]);
+  const visibleFieldKeys = selectedTemplate
+    ? [...templateFieldKeys, ...extraFieldKeys]
+    : extraFieldKeys;
 
   useEffect(() => {
     if (open) {
@@ -855,13 +1036,86 @@ function ParticipantModal({ open, event, contact, onClose, onSave }) {
     }
   }, [contact, open]);
 
+  function updateFields(nextFields) {
+    const normalizedFields = Object.fromEntries(
+      Object.entries(nextFields)
+        .map(([key, value]) => [normalizeVariableKey(key), String(value ?? "")])
+        .filter(([key]) => key)
+    );
+    setForm((current) => ({
+      ...current,
+      fields: normalizedFields,
+      fieldsText: syncFieldsText(normalizedFields)
+    }));
+  }
+
+  function updateFieldValue(key, value) {
+    updateFields({
+      ...(form.fields || {}),
+      [key]: value
+    });
+  }
+
+  function removeField(key) {
+    const nextFields = { ...(form.fields || {}) };
+    delete nextFields[key];
+    updateFields(nextFields);
+  }
+
+  function addManualField() {
+    const key = normalizeVariableKey(form.newFieldKey);
+    if (!key) {
+      setError("Indique o nome do campo personalizado.");
+      return;
+    }
+    setError("");
+    updateFields({
+      ...(form.fields || {}),
+      [key]: form.newFieldValue
+    });
+    setForm((current) => ({
+      ...current,
+      newFieldKey: "",
+      newFieldValue: ""
+    }));
+  }
+
+  function updateJson(value) {
+    setForm((current) => {
+      try {
+        const fields = JSON.parse(value || "{}");
+        const normalizedFields = fields && typeof fields === "object" && !Array.isArray(fields)
+          ? Object.fromEntries(
+            Object.entries(fields)
+              .map(([key, fieldValue]) => [normalizeVariableKey(key), String(fieldValue ?? "")])
+              .filter(([key]) => key && !participantBaseVariables.has(key))
+          )
+          : null;
+        return {
+          ...current,
+          fields: normalizedFields
+            ? normalizedFields
+            : current.fields,
+          fieldsText: value
+        };
+      } catch {
+        return { ...current, fieldsText: value };
+      }
+    });
+  }
+
   async function submit(eventSubmit) {
     eventSubmit.preventDefault();
     setBusy(true);
     setError("");
     try {
       let fields = {};
-      if (form.fieldsText.trim()) fields = JSON.parse(form.fieldsText);
+      if (form.fieldsText.trim()) {
+        fields = JSON.parse(form.fieldsText);
+        if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
+          throw new SyntaxError("Campos personalizados devem ser um objeto JSON.");
+        }
+      }
       await onSave({
         event_contact_id: form.event_contact_id,
         name: form.name,
@@ -873,7 +1127,7 @@ function ParticipantModal({ open, event, contact, onClose, onSave }) {
         fields
       });
     } catch (eventError) {
-      setError(eventError instanceof SyntaxError ? "Campos extra deve ser JSON válido." : eventError.message);
+      setError(eventError instanceof SyntaxError ? "Campos personalizados devem ser JSON válido." : eventError.message);
     } finally {
       setBusy(false);
     }
@@ -885,6 +1139,7 @@ function ParticipantModal({ open, event, contact, onClose, onSave }) {
       onClose={onClose}
       title={contact ? "Editar participante" : "Adicionar participante"}
       description={`Evento: ${event.name}`}
+      initialFocusSelector="#participant-name"
     >
       {error && <ErrorSummary message={error} />}
       <form className="form-stack" onSubmit={submit}>
@@ -917,9 +1172,53 @@ function ParticipantModal({ open, event, contact, onClose, onSave }) {
           <input type="checkbox" checked={form.selected_for_email} onChange={(e) => setForm({ ...form, selected_for_email: e.target.checked })} />
           Selecionado para envio de email
         </label>
-        <Field label="Campos extra" htmlFor="participant-fields" hint='JSON opcional para variáveis dos templates, por exemplo {"CURSO":"IA"}.'>
-          <textarea className="code-input" id="participant-fields" rows="5" value={form.fieldsText} onChange={(e) => setForm({ ...form, fieldsText: e.target.value })} />
-        </Field>
+        <section className="custom-fields-section" aria-labelledby="participant-fields-title">
+          <div className="custom-fields-header">
+            <div>
+              <h3 id="participant-fields-title">Campos personalizados</h3>
+              <p>{selectedTemplate ? `Variáveis usadas em ${selectedTemplate.name}.` : "Adicione apenas os campos necessários para este participante."}</p>
+            </div>
+            <span className={dataFieldKeys(form.fields).length ? "data-count data-count-filled" : "data-count data-count-empty"}>{dataCountLabel(form.fields)}</span>
+          </div>
+          {visibleFieldKeys.length > 0 ? (
+            <div className="custom-field-grid">
+              {visibleFieldKeys.map((key) => (
+                <div className="custom-field-row" key={key}>
+                  <Field label={key} htmlFor={`participant-field-${key.toLowerCase()}`}>
+                    <input
+                      id={`participant-field-${key.toLowerCase()}`}
+                      value={form.fields?.[key] || ""}
+                      onChange={(e) => updateFieldValue(key, e.target.value)}
+                      placeholder={`Valor de ${key}`}
+                    />
+                  </Field>
+                  {!templateFieldKeys.includes(key) && (
+                    <button className="icon-button" type="button" onClick={() => removeField(key)} aria-label={`Remover campo ${key}`} title="Remover campo">
+                      <Trash2 size={16} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="custom-fields-empty">{selectedTemplate ? "Este modelo não exige campos personalizados do participante." : "Sem campos personalizados preenchidos."}</p>
+          )}
+          <div className="manual-field-builder">
+            <Field label="Nome do campo" htmlFor="participant-new-field-key">
+              <input id="participant-new-field-key" value={form.newFieldKey} onChange={(e) => setForm({ ...form, newFieldKey: e.target.value })} placeholder="Ex.: FEEDBACK" />
+            </Field>
+            <Field label="Valor" htmlFor="participant-new-field-value">
+              <input id="participant-new-field-value" value={form.newFieldValue} onChange={(e) => setForm({ ...form, newFieldValue: e.target.value })} placeholder="Valor para este participante" />
+            </Field>
+            <button className="button button-secondary" type="button" onClick={addManualField}><Plus size={16} /> Adicionar campo</button>
+          </div>
+          <details className="advanced-json">
+            <summary><Code2 size={16} /> Editar JSON</summary>
+            <Field label="JSON dos campos" htmlFor="participant-fields" hint='Opcional para casos avançados, por exemplo {"CURSO":"IA"}.'>
+              <textarea className="code-input" id="participant-fields" rows="5" value={form.fieldsText} onChange={(e) => updateJson(e.target.value)} />
+            </Field>
+          </details>
+        </section>
         <div className="modal-actions">
           <button className="button button-secondary" type="button" onClick={onClose}>Cancelar</button>
           <button className="button button-primary" type="submit" disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : <Save size={17} />} Guardar</button>
@@ -1182,6 +1481,24 @@ function Campaigns({ event, smtpSettings, onRefresh, onOpenSettings, announce })
   });
   const [busy, setBusy] = useState(false);
   const [selectedCampaign, setSelectedCampaign] = useState(event.campaigns[0] || null);
+
+  useEffect(() => {
+    if (!event.campaigns.length) {
+      setSelectedCampaign(null);
+      return;
+    }
+
+    setSelectedCampaign((current) => {
+      const currentId = current?.id;
+      if (currentId) {
+        const refreshed = event.campaigns.find((campaign) => campaign.id === currentId);
+        if (refreshed) return refreshed;
+      }
+
+      return event.campaigns[0] || null;
+    });
+  }, [event.id, event.campaigns]);
+
   const sendableContacts = event.contacts.filter((contact) => contact.selected_for_email);
   const campaignContacts = form.selectedGroups.length
     ? sendableContacts.filter((contact) => form.selectedGroups.includes(contact.group_name || "Sem grupo"))
@@ -1603,7 +1920,7 @@ function ImportModal({ open, event, onClose, onImported }) {
         method: "POST",
         body: JSON.stringify({ contacts: preview.contacts, templates: preview.templates })
       });
-      onImported(result);
+      await onImported(result);
     } catch (eventError) {
       setError(eventError.message);
     } finally {
@@ -1720,7 +2037,7 @@ function ImportModal({ open, event, onClose, onImported }) {
   );
 }
 
-function Modal({ open, onClose, title, description, children, wide = false }) {
+function Modal({ open, onClose, title, description, children, wide = false, initialFocusSelector = "" }) {
   const dialogRef = useRef(null);
   const triggerRef = useRef(null);
   useEffect(() => {
@@ -1728,7 +2045,10 @@ function Modal({ open, onClose, title, description, children, wide = false }) {
     triggerRef.current = document.activeElement;
     const dialog = dialogRef.current;
     const focusable = () => [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')];
-    const first = focusable()[0];
+    const initialFocus = initialFocusSelector
+      ? dialog.querySelector(initialFocusSelector)
+      : null;
+    const first = initialFocus || focusable().find((item) => !item.matches("[data-modal-close]")) || focusable()[0];
     first?.focus();
     function keydown(event) {
       if (event.key === "Escape") {
@@ -1753,14 +2073,14 @@ function Modal({ open, onClose, title, description, children, wide = false }) {
       document.removeEventListener("keydown", keydown);
       triggerRef.current?.focus?.();
     };
-  }, [onClose, open]);
+  }, [initialFocusSelector, onClose, open]);
   if (!open) return null;
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className={`modal-card ${wide ? "modal-wide" : ""}`} ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-description">
         <header className="modal-header">
           <div><h2 id="modal-title">{title}</h2>{description && <p id="modal-description">{description}</p>}</div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Fechar janela"><X size={20} /></button>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Fechar janela" data-modal-close><X size={20} /></button>
         </header>
         <div className="modal-body">{children}</div>
       </section>

@@ -42,6 +42,22 @@ test("renderiza campos arbitrários e escapa valores no HTML", () => {
   assert.deepEqual(rendered.missingVariables, []);
 });
 
+test("ignora campos reservados no JSON para não sobrescrever o email principal do contacto", () => {
+  const rendered = renderTemplate(
+    {
+      subject: "{{EMAIL}}",
+      body_text: "{{EMAIL}}",
+      body_html: "<p>{{EMAIL}}</p>"
+    },
+    { name: "Filipe Francisco Gerente Gustavo", email: "fgustavo@unisced.edu.mz" },
+    { EMAIL: "fgustavo@unisced.edu" }
+  );
+
+  assert.equal(rendered.subject, "fgustavo@unisced.edu.mz");
+  assert.equal(rendered.text, "fgustavo@unisced.edu.mz");
+  assert.match(rendered.html, /fgustavo@unisced.edu.mz/);
+});
+
 test("identifica variáveis ausentes antes do envio", () => {
   const template = {
     subject: "{{NOME}}",

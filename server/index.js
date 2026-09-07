@@ -6,7 +6,6 @@ import multer from "multer";
 import nodemailer from "nodemailer";
 import fs from "node:fs";
 import path from "node:path";
-import { parse } from "csv-parse/sync";
 import {
   db,
   getCampaignWithDetails,
@@ -30,6 +29,7 @@ import {
   publicSmtpSettings
 } from "./validators.js";
 import { nextScheduleDelay } from "./scheduling.js";
+import { parseCsvRecords } from "./csv.js";
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
@@ -99,13 +99,38 @@ function parseJson(value, fallback = {}) {
   }
 }
 
+const reservedFieldKeys = new Set([
+  "NOME",
+  "NAME",
+  "EMAIL",
+  "MAIL",
+  "EMPRESA",
+  "COMPANY",
+  "COMPANHIA",
+  "GRUPO",
+  "ASSINATURA"
+]);
+
 function normalizeFields(row) {
   const fields = {};
   Object.entries(row || {}).forEach(([key, value]) => {
     const normalized = normalizeVariableKey(key);
-    if (normalized) fields[normalized] = String(value ?? "").trim();
+    if (!normalized || reservedFieldKeys.has(normalized)) return;
+    fields[normalized] = String(value ?? "").trim();
   });
   return fields;
+}
+
+function normalizeContactFields(fields, { name, email, company, groupName }) {
+  const nextFields = { ...fields };
+  Object.keys(nextFields).forEach((key) => {
+    if (reservedFieldKeys.has(normalizeVariableKey(key))) delete nextFields[key];
+  });
+  if (name) nextFields.NOME = String(name).trim();
+  if (email) nextFields.EMAIL = normalizeEmail(email);
+  if (company) nextFields.EMPRESA = String(company).trim();
+  if (groupName) nextFields.GRUPO = String(groupName).trim();
+  return nextFields;
 }
 
 function htmlToText(html) {
@@ -148,11 +173,7 @@ function templateFromUpload(file) {
 }
 
 function parseEventCsv(buffer, eventId) {
-  const records = parse(buffer.toString("utf8"), {
-    bom: true,
-    columns: true,
-    skip_empty_lines: true,
-    trim: true,
+  const records = parseCsvRecords(buffer, {
     relax_column_count: true
   });
   const seenEmails = new Set();
@@ -236,12 +257,7 @@ function parseEventCsv(buffer, eventId) {
 }
 
 function parseContactsCsv(buffer) {
-  const records = parse(buffer.toString("utf8"), {
-    bom: true,
-    columns: true,
-    skip_empty_lines: true,
-    trim: true
-  });
+  const records = parseCsvRecords(buffer);
 
   const existingEmails = new Set(
     db.prepare("SELECT lower(email) AS email FROM contacts").all().map((row) => row.email)
@@ -669,6 +685,7 @@ app.post(
     let updated = 0;
     let templateCount = 0;
     const templateMap = new Map();
+    let currentContact = null;
 
     db.exec("BEGIN IMMEDIATE");
     try {
@@ -722,38 +739,32 @@ app.post(
         INSERT INTO contacts (name, email, company)
         VALUES (?, ?, ?)
       `);
-      const updateContact = db.prepare(`
-        UPDATE contacts
-        SET name = ?, company = COALESCE(NULLIF(?, ''), company)
-        WHERE id = ?
-      `);
       const findMembership = db.prepare(`
         SELECT id FROM event_contacts WHERE event_id = ? AND contact_id = ?
       `);
       const insertMembership = db.prepare(`
         INSERT INTO event_contacts (
-          event_id, contact_id, group_name, template_key, template_id,
+          event_id, contact_id, name, email, company, group_name, template_key, template_id,
           selected_for_email, fields_json
         )
-        VALUES (?, ?, ?, ?, ?, 1, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
       `);
       const updateMembership = db.prepare(`
         UPDATE event_contacts
-        SET group_name = ?, template_key = ?, template_id = ?,
+        SET name = ?, email = ?, company = ?, group_name = ?, template_key = ?, template_id = ?,
           selected_for_email = 1, fields_json = ?, updated_at = ?
         WHERE id = ?
       `);
 
       contacts.forEach((contact) => {
+        currentContact = contact;
         const name = String(contact.name || "").trim();
         const email = normalizeEmail(contact.email);
         const company = String(contact.company || "").trim();
         if (!name || !isValidEmail(email)) return;
 
         let contactRow = findContact.get(email);
-        if (contactRow) {
-          updateContact.run(name, company, contactRow.id);
-        } else {
+        if (!contactRow) {
           const result = insertContact.run(name, email, company || null);
           contactRow = { id: Number(result.lastInsertRowid) };
         }
@@ -763,11 +774,15 @@ app.post(
           ? templateMap.get(templateKey.toLowerCase()) || null
           : null;
         const fields = normalizeFields(contact.fields || {});
+        const groupName = String(contact.group_name || "").trim();
         const membership = findMembership.get(eventId, contactRow.id);
 
         if (membership) {
           updateMembership.run(
-            String(contact.group_name || "").trim() || null,
+            name,
+            email,
+            company || null,
+            groupName || null,
             templateKey || null,
             templateId,
             JSON.stringify(fields),
@@ -779,7 +794,10 @@ app.post(
           insertMembership.run(
             eventId,
             contactRow.id,
-            String(contact.group_name || "").trim() || null,
+            name,
+            email,
+            company || null,
+            groupName || null,
             templateKey || null,
             templateId,
             JSON.stringify(fields)
@@ -794,15 +812,25 @@ app.post(
       );
       db.exec("COMMIT");
     } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // The transaction may already have been closed by SQLite.
+      }
+
+      const contactLabel = currentContact
+        ? ` para ${String(currentContact.name || currentContact.email || "um contacto")}`
+        : "";
+      throw apiError(
+        `Não foi possível concluir a importação${contactLabel}: ${error.message || error}`,
+        400
+      );
     }
 
     response.json({
       imported,
       updated,
-      templatesImported: templateCount,
-      event: getEvent(eventId)
+      templatesImported: templateCount
     });
   })
 );
@@ -832,6 +860,73 @@ app.put(
 );
 
 app.post(
+  "/api/events/:id/contacts/bulk",
+  asyncHandler(async (request, response) => {
+    const eventId = Number(request.params.id);
+    const action = String(request.body.action || "");
+    const event = getEvent(eventId);
+    if (!event) throw apiError("Evento não encontrado", 404);
+
+    if (action === "clear_all") {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        db.prepare("DELETE FROM event_contacts WHERE event_id = ?").run(eventId);
+        db.prepare("UPDATE events SET updated_at = ? WHERE id = ?").run(nowIso(), eventId);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+      response.json({ event: getEvent(eventId) });
+      return;
+    }
+
+    const eventContactIds = Array.isArray(request.body.eventContactIds)
+      ? [...new Set(request.body.eventContactIds.map(Number).filter(Number.isInteger))]
+      : [];
+    if (eventContactIds.length === 0) throw apiError("Selecione pelo menos um participante", 400);
+
+    const placeholders = eventContactIds.map(() => "?").join(", ");
+    const memberships = db.prepare(`
+      SELECT id FROM event_contacts
+      WHERE event_id = ? AND id IN (${placeholders})
+    `).all(eventId, ...eventContactIds);
+    if (memberships.length !== eventContactIds.length) {
+      throw apiError("Um ou mais participantes não pertencem a este evento", 400);
+    }
+
+    let result;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (action === "delete") {
+        result = db.prepare(`DELETE FROM event_contacts WHERE event_id = ? AND id IN (${placeholders})`)
+          .run(eventId, ...eventContactIds);
+      } else if (action === "set_selected") {
+        const selected = request.body.selected ? 1 : 0;
+        result = db.prepare(`UPDATE event_contacts SET selected_for_email = ?, updated_at = ? WHERE event_id = ? AND id IN (${placeholders})`)
+          .run(selected, nowIso(), eventId, ...eventContactIds);
+      } else if (action === "assign_template") {
+        const templateId = request.body.templateId ? Number(request.body.templateId) : null;
+        if (!templateId) throw apiError("Escolha um modelo", 400);
+        const template = db.prepare("SELECT id FROM templates WHERE id = ? AND event_id = ?").get(templateId, eventId);
+        if (!template) throw apiError("Modelo não pertence a este evento", 400);
+        result = db.prepare(`UPDATE event_contacts SET template_key = NULL, template_id = ?, updated_at = ? WHERE event_id = ? AND id IN (${placeholders})`)
+          .run(templateId, nowIso(), eventId, ...eventContactIds);
+      } else {
+        throw apiError("Ação em massa inválida", 400);
+      }
+      db.prepare("UPDATE events SET updated_at = ? WHERE id = ?").run(nowIso(), eventId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    response.json({ affected: result.changes, event: getEvent(eventId) });
+  })
+);
+
+app.post(
   "/api/events/:id/contacts",
   asyncHandler(async (request, response) => {
     const eventId = Number(request.params.id);
@@ -845,7 +940,12 @@ app.post(
       ? Number(request.body.templateId || request.body.template_id)
       : null;
     const selectedForEmail = request.body.selected_for_email === false ? 0 : 1;
-    const fields = normalizeFields(request.body.fields || {});
+    const fields = normalizeContactFields(normalizeFields(request.body.fields || {}), {
+      name,
+      email,
+      company,
+      groupName
+    });
 
     if (!name) throw apiError("Nome é obrigatório", 400);
     if (!email) throw apiError("Email é obrigatório", 400);
@@ -860,17 +960,18 @@ app.post(
     let eventContactId;
     db.exec("BEGIN IMMEDIATE");
     try {
+      // Validar email único POR EVENTO (não globalmente)
+      const emailOwner = db.prepare(`
+        SELECT id FROM event_contacts WHERE lower(email) = lower(?) AND event_id = ?
+      `).get(email, eventId);
+      if (emailOwner) throw apiError("Este email já está usado neste evento", 400);
+
+      // Procurar ou criar contacto em contacts (tabela de identidade global)
       const existingContact = db
         .prepare("SELECT id FROM contacts WHERE lower(email) = lower(?)")
         .get(email);
       let contactId = existingContact?.id;
-      if (contactId) {
-        db.prepare(`
-          UPDATE contacts
-          SET name = ?, company = ?
-          WHERE id = ?
-        `).run(name, company || null, contactId);
-      } else {
+      if (!contactId) {
         const result = db.prepare(`
           INSERT INTO contacts (name, email, company)
           VALUES (?, ?, ?)
@@ -883,12 +984,16 @@ app.post(
       `).get(eventId, contactId);
 
       if (membership) {
+        // Atualizar com dados isolados por evento
         db.prepare(`
           UPDATE event_contacts
-          SET group_name = ?, template_key = NULL, template_id = ?, selected_for_email = ?,
-            fields_json = ?, updated_at = ?
+          SET name = ?, email = ?, company = ?, group_name = ?, template_key = NULL, template_id = ?, 
+              selected_for_email = ?, fields_json = ?, updated_at = ?
           WHERE id = ?
         `).run(
+          name,
+          email,
+          company || null,
           groupName || null,
           templateId,
           selectedForEmail,
@@ -898,15 +1003,19 @@ app.post(
         );
         eventContactId = membership.id;
       } else {
+        // Criar novo event_contacts com dados isolados
         const result = db.prepare(`
           INSERT INTO event_contacts (
-            event_id, contact_id, group_name, template_id,
+            event_id, contact_id, name, email, company, group_name, template_id,
             selected_for_email, fields_json
           )
-          VALUES (?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           eventId,
           contactId,
+          name,
+          email,
+          company || null,
           groupName || null,
           templateId,
           selectedForEmail,
@@ -937,9 +1046,7 @@ app.put(
     const eventId = Number(request.params.id);
     const eventContactId = Number(request.params.eventContactId);
     const membership = db.prepare(`
-      SELECT ec.*, c.id AS contact_id
-      FROM event_contacts ec
-      JOIN contacts c ON c.id = ec.contact_id
+      SELECT ec.* FROM event_contacts ec
       WHERE ec.id = ? AND ec.event_id = ?
     `).get(eventContactId, eventId);
     if (!membership) throw apiError("Destinatário não encontrado", 404);
@@ -952,7 +1059,12 @@ app.put(
       ? Number(request.body.templateId || request.body.template_id)
       : null;
     const selectedForEmail = request.body.selected_for_email === false ? 0 : 1;
-    const fields = normalizeFields(request.body.fields || {});
+    const fields = normalizeContactFields(normalizeFields(request.body.fields || {}), {
+      name,
+      email,
+      company,
+      groupName
+    });
 
     if (!name) throw apiError("Nome é obrigatório", 400);
     if (!email) throw apiError("Email é obrigatório", 400);
@@ -964,25 +1076,24 @@ app.put(
       if (!template) throw apiError("Modelo não pertence a este evento", 400);
     }
 
+    // Validar email único POR EVENTO (não globalmente)
     const emailOwner = db.prepare(`
-      SELECT id FROM contacts WHERE lower(email) = lower(?) AND id <> ?
-    `).get(email, membership.contact_id);
-    if (emailOwner) throw apiError("Este email já pertence a outro contacto", 400);
+      SELECT id FROM event_contacts WHERE lower(email) = lower(?) AND event_id = ? AND id <> ?
+    `).get(email, eventId, eventContactId);
+    if (emailOwner) throw apiError("Este email já está usado neste evento", 400);
 
     db.exec("BEGIN IMMEDIATE");
     try {
-      db.prepare(`
-        UPDATE contacts
-        SET name = ?, email = ?, company = ?
-        WHERE id = ?
-      `).run(name, email, company || null, membership.contact_id);
-
+      // Atualizar dados isolados em event_contacts (não em contacts)
       db.prepare(`
         UPDATE event_contacts
-        SET group_name = ?, template_key = NULL, template_id = ?, selected_for_email = ?,
-          fields_json = ?, updated_at = ?
+        SET name = ?, email = ?, company = ?, group_name = ?, template_key = NULL, template_id = ?, 
+            selected_for_email = ?, fields_json = ?, updated_at = ?
         WHERE id = ? AND event_id = ?
       `).run(
+        name,
+        email,
+        company || null,
         groupName || null,
         templateId,
         selectedForEmail,

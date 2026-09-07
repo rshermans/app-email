@@ -8,10 +8,19 @@ export async function api(path, options = {}) {
     headers
   });
 
-  const payload = await response.json().catch(() => ({}));
+  const responseText = await response.text();
+  let payload = {};
+  try {
+    payload = responseText ? JSON.parse(responseText) : {};
+  } catch {
+    payload = {};
+  }
 
   if (!response.ok) {
-    const error = new Error(payload.error || "Pedido falhou");
+    const fallback = responseText && !responseText.trimStart().startsWith("<")
+      ? responseText.slice(0, 300)
+      : `Pedido falhou (HTTP ${response.status})`;
+    const error = new Error(payload.error || fallback);
     error.details = payload.details;
     throw error;
   }

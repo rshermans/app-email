@@ -153,6 +153,58 @@ addColumn("email_jobs", "template_body_html TEXT");
 addColumn("email_jobs", "merge_data_json TEXT NOT NULL DEFAULT '{}'");
 addColumn("email_jobs", "group_name TEXT");
 addColumn("event_contacts", "selected_for_email INTEGER NOT NULL DEFAULT 1");
+addColumn("event_contacts", "email TEXT COLLATE NOCASE");
+addColumn("event_contacts", "name TEXT");
+addColumn("event_contacts", "company TEXT");
+
+// Migração: copiar dados de contacts para event_contacts (isolamento por evento)
+function migrateContactsData() {
+  // Verificar se os dados já foram migrados (se email já existe em event_contacts)
+  const hasMigratedData = db
+    .prepare("SELECT COUNT(*) AS count FROM event_contacts WHERE email IS NOT NULL")
+    .get().count > 0;
+  
+  if (!hasMigratedData) {
+    console.log("[DB] Migrando dados de contactos para isolamento por evento...");
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      // Copiar dados de contacts para event_contacts
+      db.exec(`
+        UPDATE event_contacts
+        SET 
+          email = (SELECT lower(c.email) FROM contacts c WHERE c.id = event_contacts.contact_id),
+          name = (SELECT c.name FROM contacts c WHERE c.id = event_contacts.contact_id),
+          company = (SELECT c.company FROM contacts c WHERE c.id = event_contacts.contact_id)
+        WHERE email IS NULL
+      `);
+      
+      // Criar índice UNIQUE para email por evento (se não existir)
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS event_contacts_event_email_idx
+          ON event_contacts(event_id, email)
+      `);
+      
+      db.exec("COMMIT");
+      console.log("[DB] ✓ Migração concluída com sucesso");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      console.error("[DB] ✗ Erro na migração:", error.message);
+      throw error;
+    }
+  } else {
+    console.log("[DB] Dados já foram migrados, criando índice se não existir...");
+    try {
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS event_contacts_event_email_idx
+          ON event_contacts(event_id, email)
+      `);
+    } catch {
+      // Índice já pode existir, ignorar
+    }
+  }
+}
+
+migrateContactsData();
 
 const templateCount = db.prepare("SELECT COUNT(*) AS count FROM templates").get().count;
 
@@ -265,6 +317,9 @@ export function listEventContacts(eventId) {
     SELECT
       ec.id AS event_contact_id,
       ec.event_id,
+      ec.name,
+      ec.email,
+      ec.company,
       ec.group_name,
       ec.template_key,
       ec.template_id,
@@ -272,15 +327,12 @@ export function listEventContacts(eventId) {
       ec.fields_json,
       ec.updated_at,
       c.id,
-      c.name,
-      c.email,
-      c.company,
       t.name AS assigned_template_name
     FROM event_contacts ec
-    JOIN contacts c ON c.id = ec.contact_id
+    LEFT JOIN contacts c ON c.id = ec.contact_id
     LEFT JOIN templates t ON t.id = ec.template_id
     WHERE ec.event_id = ?
-    ORDER BY lower(c.name), c.id
+    ORDER BY lower(ec.name), ec.id
   `).all(eventId).map((contact) => ({
     ...contact,
     selected_for_email: Boolean(contact.selected_for_email),

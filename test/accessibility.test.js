@@ -38,3 +38,12 @@ test("preserva foco visível, reflow e redução de movimento", () => {
   assert.match(stylesSource, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(stylesSource, /@media \(forced-colors: active\)/);
 });
+
+test("oferece ações em massa acessíveis para o público do evento", () => {
+  assert.match(appSource, /aria-label="Ações para participantes selecionados"/);
+  assert.match(appSource, /id="bulk-template"/);
+  assert.match(appSource, /action, extra = \{\}/);
+  assert.match(appSource, /action === "clear_all"/);
+  assert.match(appSource, /Para limpar todos os participantes/);
+  assert.match(stylesSource, /\.bulk-actions/);
+});

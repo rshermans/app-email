@@ -1,4 +1,15 @@
 const tokenPattern = /\{\{\s*([\p{L}\p{N}_ -]+?)\s*\}\}/gu;
+const reservedVariableKeys = new Set([
+  "NOME",
+  "NAME",
+  "EMAIL",
+  "MAIL",
+  "EMPRESA",
+  "COMPANY",
+  "COMPANHIA",
+  "GRUPO",
+  "ASSINATURA"
+]);
 
 export function normalizeVariableKey(value) {
   return String(value || "")
@@ -36,14 +47,16 @@ export function buildMergeData(contact = {}, eventFields = {}, globals = {}) {
   [eventFields, globals].forEach((source) => {
     Object.entries(source || {}).forEach(([key, value]) => {
       const normalizedKey = normalizeVariableKey(key);
-      if (normalizedKey) data[normalizedKey] = value ?? "";
+      if (!normalizedKey || reservedVariableKeys.has(normalizedKey)) return;
+      data[normalizedKey] = value ?? "";
     });
   });
 
   Object.entries(contact || {}).forEach(([key, value]) => {
     if (key === "fields" || key === "fields_json") return;
     const normalizedKey = normalizeVariableKey(key);
-    if (normalizedKey) data[normalizedKey] = value ?? "";
+    if (!normalizedKey || reservedVariableKeys.has(normalizedKey)) return;
+    data[normalizedKey] = value ?? "";
   });
 
   const name = contact.name ?? contact.nome ?? data.NOME ?? data.NAME ?? "";
